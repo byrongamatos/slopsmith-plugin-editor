@@ -18,10 +18,10 @@ const STRING_COLORS = [
 // Display: lane 0 = high e (top), lane 5 = low E (bottom)
 const LANE_LABELS = ['e', 'B', 'G', 'D', 'A', 'E'];
 
-const WAVEFORM_H = 70;
-const LANE_H = 44;
+let WAVEFORM_H = 70;
+let LANE_H = 44;
 const LANES = 6;
-const BEAT_H = 24;
+let BEAT_H = 24;
 const LABEL_W = 52;
 const MIN_NOTE_W = 18;
 const NOTE_PAD = 3;
@@ -64,6 +64,9 @@ const S = {
 
     // Songs list cache
     songsList: null,
+
+    // Clipboard
+    clipboard: null, // { notes: [...], baseTime }
 };
 
 let canvas, ctx;
@@ -107,6 +110,86 @@ function snapTime(t) {
 function notes() { return S.arrangements.length ? S.arrangements[S.currentArr].notes : []; }
 function chords() { return S.arrangements.length ? S.arrangements[S.currentArr].chords : []; }
 
+// Flatten chord notes into the main notes array on load, tagging with _fromChord.
+// On save, reconstruct chords from notes sharing the same time+_fromChord group.
+function flattenChords() {
+    if (!S.arrangements.length) return;
+    const arr = S.arrangements[S.currentArr];
+    for (const ch of arr.chords) {
+        for (const cn of ch.notes) {
+            arr.notes.push({
+                time: cn.time || ch.time,
+                string: cn.string,
+                fret: cn.fret,
+                sustain: cn.sustain || 0,
+                techniques: cn.techniques || {},
+                _fromChord: true,
+                _chordId: ch.chord_id,
+            });
+        }
+    }
+    arr.chords = [];
+    arr.notes.sort((a, b) => a.time - b.time);
+}
+
+// Reconstruct chords from notes at the same time before saving
+function reconstructChords() {
+    if (!S.arrangements.length) return;
+    const arr = S.arrangements[S.currentArr];
+    const byTime = {};
+    const soloNotes = [];
+    for (const n of arr.notes) {
+        const key = n.time.toFixed(4);
+        if (!byTime[key]) byTime[key] = [];
+        byTime[key].push(n);
+    }
+    const newNotes = [];
+    const newChords = [];
+    const chordTemplates = arr.chord_templates || [];
+    const templateMap = {};
+
+    for (const key of Object.keys(byTime).sort((a, b) => parseFloat(a) - parseFloat(b))) {
+        const group = byTime[key];
+        if (group.length === 1) {
+            newNotes.push(group[0]);
+        } else {
+            // Multiple notes at same time = chord
+            const frets = [-1, -1, -1, -1, -1, -1];
+            for (const n of group) {
+                if (n.string >= 0 && n.string < 6) frets[n.string] = n.fret;
+            }
+            const fretKey = frets.join(',');
+            let tmplIdx;
+            if (fretKey in templateMap) {
+                tmplIdx = templateMap[fretKey];
+            } else {
+                tmplIdx = chordTemplates.length;
+                chordTemplates.push({
+                    name: '',
+                    frets: [...frets],
+                    fingers: [-1, -1, -1, -1, -1, -1],
+                });
+                templateMap[fretKey] = tmplIdx;
+            }
+            newChords.push({
+                time: group[0].time,
+                chord_id: tmplIdx,
+                high_density: false,
+                notes: group.map(n => ({
+                    time: n.time,
+                    string: n.string,
+                    fret: n.fret,
+                    sustain: n.sustain || 0,
+                    techniques: n.techniques || {},
+                })),
+            });
+        }
+    }
+    arr.notes = newNotes;
+    arr.chords = newChords;
+    arr.chord_templates = chordTemplates;
+}
+
 // ════════════════════════════════════════════════════════════════════
 // Drawing
 // ════════════════════════════════════════════════════════════════════
@@ -122,8 +205,8 @@ function draw() {
     drawWaveform(w);
     drawLanes(w);
     drawGrid(w);
+    drawSections(w);
     drawBeatBar(w);
-    drawChordNotes(w);
     drawNotes(w);
     drawSelectionRect(w);
     drawCursor(w, h);
@@ -182,6 +265,31 @@ function drawGrid(w) {
     }
 }
 
+function drawSections(w) {
+    const st = S.scrollX - 1;
+    const et = S.scrollX + (w - LABEL_W) / S.zoom + 1;
+    ctx.font = '9px monospace';
+    ctx.textBaseline = 'top';
+    for (const s of S.sections) {
+        if (s.start_time < st || s.start_time > et) continue;
+        const x = timeToX(s.start_time);
+        if (x < LABEL_W || x > w) continue;
+        // Dashed vertical line
+        ctx.strokeStyle = '#e8c04060';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, WAVEFORM_H);
+        ctx.lineTo(x, WAVEFORM_H + LANES * LANE_H);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Label at top of lanes
+        ctx.fillStyle = '#e8c040';
+        ctx.textAlign = 'left';
+        ctx.fillText(s.name, x + 3, WAVEFORM_H + 2);
+    }
+}
+
 function drawBeatBar(w) {
     const y = WAVEFORM_H + LANES * LANE_H;
     ctx.fillStyle = '#08081a';
@@ -234,23 +342,11 @@ function drawNotes(w) {
     for (let i = 0; i < nn.length; i++) {
         const n = nn[i];
         if (n.time + (n.sustain || 0) < st || n.time > et) continue;
-        _drawNote(n, S.sel.has(i), 'note');
+        _drawNote(n, S.sel.has(i));
     }
 }
 
-function drawChordNotes(w) {
-    const cc = chords();
-    const st = S.scrollX - 2;
-    const et = S.scrollX + (w - LABEL_W) / S.zoom + 2;
-    for (const ch of cc) {
-        if (ch.time < st || ch.time > et) continue;
-        for (const cn of ch.notes) {
-            _drawNote({ ...cn, time: cn.time || ch.time }, false, 'chord');
-        }
-    }
-}
-
-function _drawNote(n, selected, type) {
+function _drawNote(n, selected) {
     const x = timeToX(n.time);
     const y = strToY(n.string) + NOTE_PAD;
     const sw = Math.max(MIN_NOTE_W, (n.sustain || 0) * S.zoom);
@@ -258,7 +354,7 @@ function _drawNote(n, selected, type) {
     const color = STRING_COLORS[n.string] || '#888';
 
     // Body
-    ctx.fillStyle = type === 'chord' ? color + 'aa' : color + 'cc';
+    ctx.fillStyle = color + 'cc';
     ctx.beginPath();
     ctx.roundRect(x, y, sw, h, 3);
     ctx.fill();
@@ -338,6 +434,8 @@ function drawSelectionRect() {
 // Hit testing
 // ════════════════════════════════════════════════════════════════════
 
+const EDGE_GRAB = 8; // pixels from right edge to trigger resize
+
 function hitNote(mx, my) {
     const nn = notes();
     for (let i = nn.length - 1; i >= 0; i--) {
@@ -347,6 +445,21 @@ function hitNote(mx, my) {
         const w = Math.max(MIN_NOTE_W, (n.sustain || 0) * S.zoom);
         const h = LANE_H - NOTE_PAD * 2;
         if (mx >= x && mx <= x + w && my >= y && my <= y + h) return i;
+    }
+    return -1;
+}
+
+function hitNoteEdge(mx, my) {
+    // Returns note index if mouse is near the right edge of a note (for sustain resize)
+    const nn = notes();
+    for (let i = nn.length - 1; i >= 0; i--) {
+        const n = nn[i];
+        const x = timeToX(n.time);
+        const y = strToY(n.string) + NOTE_PAD;
+        const w = Math.max(MIN_NOTE_W, (n.sustain || 0) * S.zoom);
+        const h = LANE_H - NOTE_PAD * 2;
+        const rightEdge = x + w;
+        if (mx >= rightEdge - EDGE_GRAB && mx <= rightEdge + EDGE_GRAB && my >= y && my <= y + h) return i;
     }
     return -1;
 }
@@ -429,6 +542,16 @@ class DeleteNotesCmd {
     }
 }
 
+class ResizeSustainCmd {
+    constructor(index, newSustain) {
+        this.index = index;
+        this.newSustain = newSustain;
+        this.oldSustain = notes()[index].sustain || 0;
+    }
+    exec() { notes()[this.index].sustain = this.newSustain; }
+    rollback() { notes()[this.index].sustain = this.oldSustain; }
+}
+
 class ChangeFretCmd {
     constructor(index, newFret) {
         this.index = index;
@@ -464,8 +587,6 @@ function onMouseDown(e) {
     if (e.button === 2) return;
 
     // Left button
-    const idx = hitNote(x, y);
-
     if (y < WAVEFORM_H) {
         // Click on waveform = set cursor
         S.cursorTime = Math.max(0, xToTime(x));
@@ -474,18 +595,45 @@ function onMouseDown(e) {
         return;
     }
 
+    // Check for sustain edge grab first
+    const edgeIdx = hitNoteEdge(x, y);
+    if (edgeIdx >= 0) {
+        if (!S.sel.has(edgeIdx)) { S.sel.clear(); S.sel.add(edgeIdx); }
+        const n = notes()[edgeIdx];
+        S.drag = {
+            type: 'resize',
+            noteIdx: edgeIdx,
+            startX: x,
+            origSustain: n.sustain || 0,
+        };
+        draw();
+        return;
+    }
+
+    const idx = hitNote(x, y);
+
     if (idx >= 0) {
-        // Click on note
+        // Click on note — also select all chord siblings (same time)
+        const nn = notes();
+        const clickedTime = nn[idx].time;
+        const chordSiblings = [];
+        for (let i = 0; i < nn.length; i++) {
+            if (Math.abs(nn[i].time - clickedTime) < 0.001) chordSiblings.push(i);
+        }
+        const isChord = chordSiblings.length > 1;
+
         if (e.shiftKey) {
-            // Multi-select toggle
-            if (S.sel.has(idx)) S.sel.delete(idx); else S.sel.add(idx);
+            // Multi-select toggle — toggle the whole chord group
+            const allSelected = chordSiblings.every(i => S.sel.has(i));
+            for (const i of chordSiblings) {
+                if (allSelected) S.sel.delete(i); else S.sel.add(i);
+            }
         } else if (!S.sel.has(idx)) {
             S.sel.clear();
-            S.sel.add(idx);
+            for (const i of chordSiblings) S.sel.add(i);
         }
 
         // Start drag
-        const nn = notes();
         const selArr = [...S.sel];
         S.drag = {
             type: 'move',
@@ -509,8 +657,17 @@ function onMouseDown(e) {
 }
 
 function onMouseMove(e) {
-    if (!S.drag) return;
     const { x, y } = getMousePos(e);
+
+    // Cursor hint when not dragging
+    if (!S.drag) {
+        if (canvas && y >= WAVEFORM_H && y < WAVEFORM_H + LANES * LANE_H) {
+            canvas.style.cursor = hitNoteEdge(x, y) >= 0 ? 'ew-resize' : '';
+        } else if (canvas) {
+            canvas.style.cursor = '';
+        }
+        return;
+    }
 
     if (S.drag.type === 'pan') {
         const dx = x - S.drag.startX;
@@ -522,6 +679,14 @@ function onMouseMove(e) {
     if (S.drag.type === 'select') {
         S.drag.curX = x;
         S.drag.curY = y;
+        draw();
+        return;
+    }
+
+    if (S.drag.type === 'resize') {
+        const dt = (x - S.drag.startX) / S.zoom;
+        const nn = notes();
+        nn[S.drag.noteIdx].sustain = Math.max(0, S.drag.origSustain + dt);
         draw();
         return;
     }
@@ -550,6 +715,16 @@ function onMouseMove(e) {
 function onMouseUp(e) {
     if (!S.drag) return;
     const { x, y } = getMousePos(e);
+
+    if (S.drag.type === 'resize') {
+        const nn = notes();
+        const finalSustain = nn[S.drag.noteIdx].sustain;
+        // Revert so the command can apply it
+        nn[S.drag.noteIdx].sustain = S.drag.origSustain;
+        if (finalSustain !== S.drag.origSustain) {
+            S.history.exec(new ResizeSustainCmd(S.drag.noteIdx, finalSustain));
+        }
+    }
 
     if (S.drag.type === 'move' && S.drag.moved) {
         // Commit move as undo command
@@ -622,6 +797,14 @@ function onWheel(e) {
 function onContextMenu(e) {
     e.preventDefault();
     const { x, y } = getMousePos(e);
+
+    // Right-click on beat bar or lanes with no note = section menu
+    const beatBarY = WAVEFORM_H + LANES * LANE_H;
+    if (y >= beatBarY || (y >= WAVEFORM_H && hitNote(x, y) < 0)) {
+        showSectionMenu(e.clientX, e.clientY, xToTime(x));
+        return;
+    }
+
     const idx = hitNote(x, y);
     if (idx < 0) return;
 
@@ -631,6 +814,45 @@ function onContextMenu(e) {
     }
     draw();
     showContextMenu(e.clientX, e.clientY, idx);
+}
+
+function showSectionMenu(cx, cy, time) {
+    const menu = document.getElementById('editor-context-menu');
+    // Check if clicking near an existing section
+    let nearSection = null;
+    for (const s of S.sections) {
+        if (Math.abs(s.start_time - time) < 1.0) { nearSection = s; break; }
+    }
+
+    let html = '';
+    html += `<button class="w-full text-left px-3 py-1 text-xs hover:bg-dark-500" data-action="add">Add Section Here</button>`;
+    if (nearSection) {
+        html += `<button class="w-full text-left px-3 py-1 text-xs hover:bg-dark-500" data-action="rename">Rename "${nearSection.name}"</button>`;
+        html += `<button class="w-full text-left px-3 py-1 text-xs hover:bg-dark-500 text-red-400" data-action="delete">Delete "${nearSection.name}"</button>`;
+    }
+    menu.innerHTML = html;
+    menu.querySelectorAll('[data-action]').forEach(btn => {
+        btn.onclick = () => {
+            hideContextMenu();
+            if (btn.dataset.action === 'add') {
+                const name = prompt('Section name:', 'verse');
+                if (!name) return;
+                const num = S.sections.filter(s => s.name === name).length + 1;
+                S.sections.push({ name, number: num, start_time: snapTime(time) });
+                S.sections.sort((a, b) => a.start_time - b.start_time);
+                draw();
+            } else if (btn.dataset.action === 'rename' && nearSection) {
+                const name = prompt('New name:', nearSection.name);
+                if (name) { nearSection.name = name; draw(); }
+            } else if (btn.dataset.action === 'delete' && nearSection) {
+                const i = S.sections.indexOf(nearSection);
+                if (i >= 0) { S.sections.splice(i, 1); draw(); }
+            }
+        };
+    });
+    menu.style.left = cx + 'px';
+    menu.style.top = cy + 'px';
+    menu.classList.remove('hidden');
 }
 
 function onKeyDown(e) {
@@ -673,6 +895,54 @@ function onKeyDown(e) {
             return;
         }
     }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        if (S.sel.size && !e.target.matches('input, select, textarea')) {
+            e.preventDefault();
+            const nn = notes();
+            const selNotes = [...S.sel].map(i => nn[i]);
+            const baseTime = Math.min(...selNotes.map(n => n.time));
+            S.clipboard = {
+                notes: selNotes.map(n => ({
+                    time: n.time - baseTime,
+                    string: n.string,
+                    fret: n.fret,
+                    sustain: n.sustain || 0,
+                    techniques: { ...(n.techniques || {}) },
+                })),
+                baseTime,
+            };
+            setStatus(`Copied ${selNotes.length} notes`);
+            return;
+        }
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        if (S.clipboard && S.clipboard.notes.length && !e.target.matches('input, select, textarea')) {
+            e.preventDefault();
+            const pasteTime = S.cursorTime;
+            const newNotes = S.clipboard.notes.map(n => ({
+                time: n.time + pasteTime,
+                string: n.string,
+                fret: n.fret,
+                sustain: n.sustain,
+                techniques: { ...(n.techniques || {}) },
+            }));
+            // Batch add via a compound command
+            const nn = notes();
+            const addCmd = {
+                _notes: newNotes,
+                exec() { for (const n of this._notes) nn.push(n); nn.sort((a, b) => a.time - b.time); },
+                rollback() { for (const n of this._notes) { const i = nn.indexOf(n); if (i >= 0) nn.splice(i, 1); } },
+            };
+            S.history.exec(addCmd);
+            // Select pasted notes
+            S.sel.clear();
+            for (const n of newNotes) { const i = nn.indexOf(n); if (i >= 0) S.sel.add(i); }
+            draw();
+            updateStatus();
+            setStatus(`Pasted ${newNotes.length} notes at cursor`);
+            return;
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -683,6 +953,8 @@ function showContextMenu(cx, cy, idx) {
     const menu = document.getElementById('editor-context-menu');
     const items = [
         { label: 'Change Fret...', action: () => promptFret(idx) },
+        { label: 'Bend...', action: () => promptBend(idx) },
+        { label: 'Slide To...', action: () => promptSlide(idx) },
         { label: 'Delete', action: () => { S.history.exec(new DeleteNotesCmd([...S.sel])); draw(); updateStatus(); } },
         { type: 'sep' },
         { label: 'Hammer-On', toggle: 'hammer_on', idx },
@@ -734,6 +1006,32 @@ function promptFret(idx) {
     if (val === null) return;
     const fret = Math.max(0, Math.min(24, parseInt(val) || 0));
     S.history.exec(new ChangeFretCmd(idx, fret));
+    draw();
+}
+
+function promptBend(idx) {
+    hideContextMenu();
+    const n = notes()[idx];
+    const techs = n.techniques || {};
+    const current = techs.bend || 0;
+    const val = prompt('Bend amount in semitones (0 = none, 1 = full, 0.5 = half):', current);
+    if (val === null) return;
+    const bend = Math.max(0, Math.min(3, parseFloat(val) || 0));
+    if (!n.techniques) n.techniques = {};
+    n.techniques.bend = bend;
+    draw();
+}
+
+function promptSlide(idx) {
+    hideContextMenu();
+    const n = notes()[idx];
+    const techs = n.techniques || {};
+    const current = techs.slide_to >= 0 ? techs.slide_to : '';
+    const val = prompt('Slide to fret (-1 or empty = no slide):', current);
+    if (val === null) return;
+    if (!n.techniques) n.techniques = {};
+    const fret = parseInt(val);
+    n.techniques.slide_to = isNaN(fret) || fret < 0 ? -1 : Math.min(24, fret);
     draw();
 }
 
@@ -923,14 +1221,22 @@ async function loadCDLC(filename) {
         S.cursorTime = 0;
         S.history = new EditHistory();
 
+        // Flatten chord notes into main notes array for unified editing
+        flattenChords();
+
         // Update UI
         document.getElementById('editor-song-title').textContent =
             `${S.artist} — ${S.title}`;
+        S.createMode = false;
         document.getElementById('editor-save-btn').disabled = false;
+        document.getElementById('editor-save-btn').classList.remove('hidden');
+        document.getElementById('editor-build-btn').classList.add('hidden');
         document.getElementById('editor-play-btn').disabled = !data.audio_url;
+        document.getElementById('editor-sync-btn').classList.toggle('hidden', !data.audio_url);
         updateArrangementSelector();
         updateStatus();
         updateTimeDisplay();
+        updateBPMDisplay();
 
         // Load audio
         if (data.audio_url) {
@@ -1001,6 +1307,10 @@ function filterSongs(q) {
 async function saveCDLC() {
     if (!S.sessionId) return;
     setStatus('Saving...');
+
+    // Reconstruct chords from notes at the same time position
+    reconstructChords();
+
     const arr = S.arrangements[S.currentArr];
     try {
         const resp = await fetch('/api/plugins/editor/save', {
@@ -1021,6 +1331,10 @@ async function saveCDLC() {
         setStatus('Saved successfully');
     } catch (e) {
         setStatus('Save failed: ' + e.message);
+    } finally {
+        // Re-flatten so editing continues with unified notes
+        flattenChords();
+        draw();
     }
 }
 
@@ -1046,11 +1360,24 @@ function updateZoomDisplay() {
     if (el) el.textContent = Math.round(S.zoom);
 }
 
+function updateBPMDisplay() {
+    const el = document.getElementById('editor-bpm');
+    if (el && S.beats.length >= 2) el.value = getTabBPM().toFixed(1);
+}
+
 function resizeCanvas() {
     if (!canvas) return;
     const wrap = document.getElementById('editor-canvas-wrap');
     const w = wrap.clientWidth;
-    const h = canvasH();
+    const h = wrap.clientHeight;
+    if (w <= 0 || h <= 0) return;
+
+    // Dynamically size lanes to fill available height
+    const minBeat = 20, minWave = 50;
+    BEAT_H = Math.max(minBeat, Math.floor(h * 0.05));
+    WAVEFORM_H = Math.max(minWave, Math.floor(h * 0.12));
+    LANE_H = Math.max(30, Math.floor((h - WAVEFORM_H - BEAT_H) / LANES));
+
     canvas.width = w * DPR;
     canvas.height = h * DPR;
     canvas.style.width = w + 'px';
@@ -1079,9 +1406,48 @@ window.editorZoom = (dir) => {
     draw();
 };
 window.editorSetSnap = (idx) => { S.snapIdx = idx; };
+window.editorSetBPM = (val) => {
+    const newBPM = parseFloat(val);
+    if (!newBPM || newBPM <= 0 || S.beats.length < 2) return;
+    const oldBPM = getTabBPM();
+    const factor = oldBPM / newBPM;
+    if (Math.abs(factor - 1) < 0.001) return;
+
+    // Scale all times
+    const nn = notes();
+    for (const n of nn) {
+        n.time *= factor;
+        if (n.sustain) n.sustain *= factor;
+    }
+    for (const b of S.beats) b.time *= factor;
+    for (const s of S.sections) s.start_time *= factor;
+
+    draw();
+    setStatus(`Tempo changed: ${oldBPM.toFixed(1)} → ${newBPM.toFixed(1)} BPM`);
+};
+window.editorApplyOffset = (val) => {
+    const offset = parseFloat(val) || 0;
+    const currentOffset = parseFloat(document.getElementById('editor-offset').dataset.applied || '0');
+    const delta = offset - currentOffset;
+    if (Math.abs(delta) < 0.0001) return;
+    const nn = notes();
+    for (const n of nn) n.time += delta;
+    for (const b of S.beats) b.time += delta;
+    for (const s of S.sections) s.start_time += delta;
+    document.getElementById('editor-offset').dataset.applied = String(offset);
+    draw();
+    setStatus(`Offset: ${offset >= 0 ? '+' : ''}${(offset * 1000).toFixed(0)}ms`);
+};
+window.editorNudgeOffset = (delta) => {
+    const el = document.getElementById('editor-offset');
+    const current = parseFloat(el.value) || 0;
+    el.value = (current + delta).toFixed(3);
+    editorApplyOffset(el.value);
+};
 window.editorSelectArrangement = (val) => {
     S.currentArr = parseInt(val) || 0;
     S.sel.clear();
+    flattenChords();
     draw();
     updateStatus();
 };
@@ -1100,6 +1466,486 @@ window.editSong = (filename) => {
 };
 
 // ════════════════════════════════════════════════════════════════════
+// Sync Tempo — detect audio BPM and scale notes to match
+// ════════════════════════════════════════════════════════════════════
+
+let syncState = { tabBPM: 0, audioBPM: 0 };
+
+function detectAudioBPM() {
+    if (!S.audioBuffer) return 0;
+    const data = S.audioBuffer.getChannelData(0);
+    const sr = S.audioBuffer.sampleRate;
+
+    // Bandpass-approximate: use short + long energy windows for spectral flux
+    const winSize = 1024;
+    const hopSize = 512;
+    const numFrames = Math.floor((data.length - winSize) / hopSize);
+    const energy = new Float32Array(numFrames);
+    for (let i = 0; i < numFrames; i++) {
+        let sum = 0;
+        const off = i * hopSize;
+        for (let j = 0; j < winSize; j++) {
+            sum += data[off + j] * data[off + j];
+        }
+        energy[i] = Math.sqrt(sum / winSize);
+    }
+
+    // Onset: spectral flux with adaptive threshold
+    const onset = new Float32Array(numFrames);
+    const avgWin = 16;
+    for (let i = avgWin; i < numFrames; i++) {
+        const diff = Math.max(0, energy[i] - energy[i - 1]);
+        // Subtract local average to suppress sustained notes
+        let localAvg = 0;
+        for (let j = i - avgWin; j < i; j++) localAvg += Math.max(0, energy[j] - energy[j - 1]);
+        localAvg /= avgWin;
+        onset[i] = Math.max(0, diff - localAvg * 1.2);
+    }
+
+    // Autocorrelation for BPM range 60-220
+    const frameDur = hopSize / sr;
+    const minLag = Math.floor(60 / (220 * frameDur));
+    const maxLag = Math.floor(60 / (60 * frameDur));
+    const useLen = Math.min(onset.length, Math.floor(30 / frameDur));
+
+    // Collect all peaks, not just the best
+    const corrs = new Float32Array(maxLag + 1);
+    for (let lag = minLag; lag <= Math.min(maxLag, useLen / 2); lag++) {
+        let corr = 0;
+        const n = useLen - lag;
+        for (let i = 0; i < n; i++) corr += onset[i] * onset[i + lag];
+        corrs[lag] = corr;
+    }
+
+    // Find top peaks in autocorrelation
+    const peaks = [];
+    for (let lag = minLag + 1; lag < maxLag; lag++) {
+        if (corrs[lag] > corrs[lag - 1] && corrs[lag] > corrs[lag + 1] && corrs[lag] > 0) {
+            peaks.push({ lag, corr: corrs[lag], bpm: 60 / (lag * frameDur) });
+        }
+    }
+    peaks.sort((a, b) => b.corr - a.corr);
+
+    if (!peaks.length) return 120;
+
+    // Score each candidate: prefer strong correlation + BPM in 80-180 sweet spot
+    // Also check if 2x or 0.5x of a candidate has strong correlation (harmonic check)
+    let bestScore = -Infinity;
+    let bestBPM = peaks[0].bpm;
+
+    for (const p of peaks.slice(0, 10)) {
+        let score = p.corr;
+
+        // Boost BPMs in the 90-180 range (most common for music)
+        if (p.bpm >= 90 && p.bpm <= 180) score *= 1.5;
+        else if (p.bpm >= 70 && p.bpm <= 200) score *= 1.1;
+
+        // Check if half-tempo has strong support (penalize sub-harmonics)
+        const halfLag = Math.round(p.lag / 2);
+        if (halfLag >= minLag && halfLag <= maxLag && corrs[halfLag] > p.corr * 0.6) {
+            // Half-lag is also strong — this candidate might be a sub-harmonic
+            score *= 0.7;
+        }
+
+        // Check if double-tempo also has support (confirms this is the real beat)
+        const dblLag = p.lag * 2;
+        if (dblLag <= maxLag && corrs[dblLag] > p.corr * 0.3) {
+            score *= 1.3;
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestBPM = p.bpm;
+        }
+    }
+
+    return bestBPM;
+}
+
+function getTabBPM() {
+    if (S.beats.length < 2) return 120;
+    // Find average BPM from downbeats (measure > 0)
+    const downbeats = S.beats.filter(b => b.measure > 0);
+    if (downbeats.length < 2) {
+        // Fallback: use all consecutive beats
+        let total = 0;
+        for (let i = 1; i < Math.min(S.beats.length, 50); i++) {
+            total += S.beats[i].time - S.beats[i - 1].time;
+        }
+        const avgInterval = total / (Math.min(S.beats.length, 50) - 1);
+        return 60 / avgInterval;
+    }
+    // Measure intervals between consecutive downbeats, divide by beats per measure
+    let intervals = [];
+    for (let i = 1; i < downbeats.length; i++) {
+        const dt = downbeats[i].time - downbeats[i - 1].time;
+        // Count beats between these downbeats
+        const beatsInMeasure = S.beats.filter(
+            b => b.time >= downbeats[i - 1].time && b.time < downbeats[i].time
+        ).length;
+        if (beatsInMeasure > 0) intervals.push(dt / beatsInMeasure);
+    }
+    if (!intervals.length) return 120;
+    const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    return 60 / avg;
+}
+
+window.editorSyncTempo = () => {
+    if (!S.audioBuffer || S.beats.length < 2) {
+        setStatus('Need audio and beats loaded for sync');
+        return;
+    }
+
+    setStatus('Detecting audio BPM...');
+    syncState.tabBPM = getTabBPM();
+    syncState.audioBPM = detectAudioBPM();
+
+    document.getElementById('sync-tab-bpm').textContent = syncState.tabBPM.toFixed(1);
+    document.getElementById('sync-audio-bpm').textContent = syncState.audioBPM.toFixed(1);
+    document.getElementById('sync-manual-bpm').value = '';
+    document.getElementById('sync-offset').value = '0';
+    editorSyncUpdateFactor();
+
+    const dlg = document.getElementById('editor-sync-dialog');
+    const btn = document.getElementById('editor-sync-btn');
+    const rect = btn.getBoundingClientRect();
+    dlg.style.left = rect.left + 'px';
+    dlg.style.top = (rect.bottom + 4) + 'px';
+    dlg.classList.remove('hidden');
+    setStatus('Ready');
+};
+
+window.editorSyncUpdateFactor = () => {
+    const manual = parseFloat(document.getElementById('sync-manual-bpm').value);
+    const audioBPM = manual > 0 ? manual : syncState.audioBPM;
+    const factor = audioBPM / syncState.tabBPM;
+    document.getElementById('sync-factor').textContent = factor.toFixed(4);
+    if (manual > 0) {
+        document.getElementById('sync-audio-bpm').textContent = manual.toFixed(1) + ' (manual)';
+    } else {
+        document.getElementById('sync-audio-bpm').textContent = syncState.audioBPM.toFixed(1);
+    }
+};
+
+window.editorHideSyncDialog = () => {
+    document.getElementById('editor-sync-dialog').classList.add('hidden');
+};
+
+window.editorApplySync = () => {
+    const manual = parseFloat(document.getElementById('sync-manual-bpm').value);
+    const audioBPM = manual > 0 ? manual : syncState.audioBPM;
+    const factor = audioBPM / syncState.tabBPM;
+    const offset = parseFloat(document.getElementById('sync-offset').value) || 0;
+
+    if (factor <= 0 || !isFinite(factor)) return;
+
+    // Scale all note times and sustains
+    const nn = notes();
+    for (const n of nn) {
+        n.time = n.time / factor + offset;
+        if (n.sustain) n.sustain = n.sustain / factor;
+    }
+
+    // Scale beat times
+    for (const b of S.beats) {
+        b.time = b.time / factor + offset;
+    }
+
+    // Scale section times
+    for (const s of S.sections) {
+        s.start_time = s.start_time / factor + offset;
+    }
+
+    editorHideSyncDialog();
+    draw();
+    setStatus(`Tempo synced: scaled ${factor.toFixed(4)}x` + (offset ? `, offset ${offset}s` : ''));
+};
+
+// ════════════════════════════════════════════════════════════════════
+// Create mode
+// ════════════════════════════════════════════════════════════════════
+
+let createState = {
+    gpPath: null,
+    tracks: null,
+    audioUrl: null,
+    audioMode: 'file', // 'file' or 'youtube'
+    artPath: null,
+};
+
+window.editorShowCreateModal = () => {
+    createState = { gpPath: null, tracks: null, audioUrl: null, audioMode: 'file', artPath: null };
+    document.getElementById('editor-create-modal').classList.remove('hidden');
+    document.getElementById('editor-create-tracks').classList.add('hidden');
+    document.getElementById('editor-create-go').disabled = true;
+    document.getElementById('editor-create-status').textContent = '';
+    document.getElementById('editor-audio-status').textContent = '';
+    document.getElementById('editor-create-gp').value = '';
+    document.getElementById('editor-create-audio').value = '';
+    document.getElementById('editor-create-yt-url').value = '';
+    document.getElementById('editor-create-title').value = '';
+    document.getElementById('editor-create-artist').value = '';
+    document.getElementById('editor-create-album').value = '';
+    document.getElementById('editor-create-year').value = '';
+    editorSetAudioMode('file');
+};
+
+window.editorHideCreateModal = () => {
+    document.getElementById('editor-create-modal').classList.add('hidden');
+};
+
+window.editorSetAudioMode = (mode) => {
+    createState.audioMode = mode;
+    document.getElementById('editor-audio-file-input').classList.toggle('hidden', mode !== 'file');
+    document.getElementById('editor-audio-yt-input').classList.toggle('hidden', mode !== 'youtube');
+    document.getElementById('editor-audio-mode-file').className =
+        'px-3 py-1 rounded text-xs ' + (mode === 'file' ? 'bg-accent' : 'bg-dark-600 hover:bg-dark-500');
+    document.getElementById('editor-audio-mode-yt').className =
+        'px-3 py-1 rounded text-xs ' + (mode === 'youtube' ? 'bg-accent' : 'bg-dark-600 hover:bg-dark-500');
+};
+
+window.editorGPFileSelected = async (input) => {
+    if (!input.files.length) return;
+    const file = input.files[0];
+    const status = document.getElementById('editor-create-status');
+    status.textContent = 'Uploading Guitar Pro file...';
+
+    const form = new FormData();
+    form.append('file', file);
+
+    try {
+        const resp = await fetch('/api/plugins/editor/import-gp', { method: 'POST', body: form });
+        const data = await resp.json();
+        if (data.error) { status.textContent = 'Error: ' + data.error; return; }
+
+        createState.gpPath = data.gp_path;
+        createState.tracks = data.tracks;
+
+        // Show track list
+        const listEl = document.getElementById('editor-create-track-list');
+        listEl.innerHTML = data.tracks.map(t =>
+            `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
+                <input type="checkbox" value="${t.index}" checked
+                    class="accent-accent" ${t.is_percussion || t.notes === 0 ? 'disabled' : ''}>
+                <span class="${t.is_percussion ? 'text-gray-600' : ''}">${t.name}</span>
+                <span class="text-gray-600">${t.strings}str, ${t.notes} notes${t.is_percussion ? ' (percussion)' : ''}</span>
+            </label>`
+        ).join('');
+        document.getElementById('editor-create-tracks').classList.remove('hidden');
+
+        // Auto-fill title from filename
+        const stem = file.name.replace(/\.(gp[345x]?|gpx)$/i, '');
+        if (!document.getElementById('editor-create-title').value) {
+            document.getElementById('editor-create-title').value = stem;
+        }
+
+        status.textContent = `Parsed: ${data.tracks.length} tracks found`;
+        updateCreateButton();
+    } catch (e) {
+        status.textContent = 'Upload failed: ' + e.message;
+    }
+};
+
+async function uploadCreateAudio() {
+    const audioStatus = document.getElementById('editor-audio-status');
+
+    if (createState.audioMode === 'youtube') {
+        const url = document.getElementById('editor-create-yt-url').value.trim();
+        if (!url) return false;
+        audioStatus.textContent = 'Downloading from YouTube...';
+        try {
+            const resp = await fetch('/api/plugins/editor/youtube-audio', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            const data = await resp.json();
+            if (data.error) { audioStatus.textContent = 'Error: ' + data.error; return false; }
+            createState.audioUrl = data.audio_url;
+            audioStatus.textContent = 'Audio ready: ' + (data.title || 'downloaded');
+            return true;
+        } catch (e) {
+            audioStatus.textContent = 'Download failed: ' + e.message;
+            return false;
+        }
+    } else {
+        const input = document.getElementById('editor-create-audio');
+        if (!input.files.length) return false;
+        audioStatus.textContent = 'Uploading audio...';
+        const form = new FormData();
+        form.append('file', input.files[0]);
+        try {
+            const resp = await fetch('/api/plugins/editor/upload-audio', { method: 'POST', body: form });
+            const data = await resp.json();
+            if (data.error) { audioStatus.textContent = 'Error: ' + data.error; return false; }
+            createState.audioUrl = data.audio_url;
+            audioStatus.textContent = 'Audio uploaded';
+            return true;
+        } catch (e) {
+            audioStatus.textContent = 'Upload failed: ' + e.message;
+            return false;
+        }
+    }
+}
+
+function updateCreateButton() {
+    const hasGP = !!createState.gpPath;
+    const hasAudio = createState.audioMode === 'youtube'
+        ? !!document.getElementById('editor-create-yt-url').value.trim()
+        : !!(document.getElementById('editor-create-audio').files || []).length;
+    document.getElementById('editor-create-go').disabled = !hasGP;
+}
+
+// Wire up input change events for enabling the create button
+document.addEventListener('change', (e) => {
+    if (e.target.id === 'editor-create-audio') updateCreateButton();
+});
+document.addEventListener('input', (e) => {
+    if (e.target.id === 'editor-create-yt-url') updateCreateButton();
+});
+
+window.editorDoCreate = async () => {
+    if (!createState.gpPath) return;
+    const status = document.getElementById('editor-create-status');
+    const btn = document.getElementById('editor-create-go');
+    btn.disabled = true;
+
+    // Upload/download audio first
+    const hasAudioInput = createState.audioMode === 'youtube'
+        ? !!document.getElementById('editor-create-yt-url').value.trim()
+        : !!(document.getElementById('editor-create-audio').files || []).length;
+
+    if (hasAudioInput && !createState.audioUrl) {
+        const ok = await uploadCreateAudio();
+        if (!ok) { btn.disabled = false; return; }
+    }
+
+    // Get selected track indices
+    const checkboxes = document.querySelectorAll('#editor-create-track-list input[type=checkbox]:checked:not(:disabled)');
+    const trackIndices = [...checkboxes].map(cb => parseInt(cb.value));
+
+    status.textContent = 'Converting Guitar Pro to Rocksmith...';
+
+    try {
+        const resp = await fetch('/api/plugins/editor/convert-gp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                gp_path: createState.gpPath,
+                audio_url: createState.audioUrl || '',
+                track_indices: trackIndices.length ? trackIndices : null,
+                title: document.getElementById('editor-create-title').value || 'Untitled',
+                artist: document.getElementById('editor-create-artist').value || 'Unknown',
+                album: document.getElementById('editor-create-album').value || '',
+                year: document.getElementById('editor-create-year').value || '',
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) { status.textContent = 'Error: ' + data.error; btn.disabled = false; return; }
+
+        // Load into editor
+        editorHideCreateModal();
+        S.title = data.title || '';
+        S.artist = data.artist || '';
+        S.filename = '';
+        S.sessionId = data.session_id;
+        S.arrangements = data.arrangements || [];
+        S.beats = data.beats || [];
+        S.sections = data.sections || [];
+        S.duration = data.duration || 0;
+        S.offset = data.offset || 0;
+        S.currentArr = 0;
+        S.sel.clear();
+        S.scrollX = 0;
+        S.cursorTime = 0;
+        S.history = new EditHistory();
+        S.createMode = true;
+
+        flattenChords();
+
+        document.getElementById('editor-song-title').textContent =
+            `${S.artist} — ${S.title} (new)`;
+        document.getElementById('editor-save-btn').classList.add('hidden');
+        document.getElementById('editor-build-btn').classList.remove('hidden');
+        document.getElementById('editor-play-btn').disabled = !data.audio_url;
+        document.getElementById('editor-sync-btn').classList.toggle('hidden', !data.audio_url);
+        updateArrangementSelector();
+        updateStatus();
+        updateTimeDisplay();
+        updateBPMDisplay();
+
+        if (data.audio_url) await loadAudio(data.audio_url);
+        draw();
+        setStatus('Imported — edit notes then click Build CDLC');
+    } catch (e) {
+        status.textContent = 'Import failed: ' + e.message;
+        btn.disabled = false;
+    }
+};
+
+window.editorBuild = async () => {
+    if (!S.sessionId || !S.createMode) return;
+    setStatus('Building CDLC...');
+
+    // Reconstruct chords for ALL arrangements before sending
+    const savedArr = S.currentArr;
+    const allArrangements = [];
+    for (let i = 0; i < S.arrangements.length; i++) {
+        S.currentArr = i;
+        reconstructChords();
+        const arr = S.arrangements[i];
+        allArrangements.push({
+            name: arr.name,
+            notes: arr.notes,
+            chords: arr.chords,
+            chord_templates: arr.chord_templates,
+        });
+    }
+    S.currentArr = savedArr;
+
+    // Upload album art if selected
+    const artInput = document.getElementById('editor-create-art');
+    if (artInput && artInput.files && artInput.files.length && !createState.artPath) {
+        const form = new FormData();
+        form.append('file', artInput.files[0]);
+        try {
+            const r = await fetch('/api/plugins/editor/upload-art', { method: 'POST', body: form });
+            const d = await r.json();
+            if (d.art_path) createState.artPath = d.art_path;
+        } catch (_) {}
+    }
+
+    try {
+        const resp = await fetch('/api/plugins/editor/build', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: S.sessionId,
+                arrangements: allArrangements,
+                beats: S.beats,
+                sections: S.sections,
+                audio_url: createState.audioUrl || '',
+                art_path: createState.artPath || '',
+                metadata: {
+                    title: S.title,
+                    artist: S.artist,
+                    artistName: S.artist,
+                },
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) { setStatus('Build error: ' + data.error); return; }
+        setStatus('CDLC built: ' + data.path);
+    } catch (e) {
+        setStatus('Build failed: ' + e.message);
+    } finally {
+        // Re-flatten current arrangement for continued editing
+        flattenChords();
+        draw();
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════
 // Init
 // ════════════════════════════════════════════════════════════════════
 
@@ -1110,8 +1956,8 @@ function init() {
     S.history = new EditHistory();
 
     canvas.addEventListener('mousedown', onMouseDown);
-    canvas.addEventListener('mousemove', onMouseMove);
-    canvas.addEventListener('mouseup', onMouseUp);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
     canvas.addEventListener('dblclick', onDblClick);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('contextmenu', onContextMenu);

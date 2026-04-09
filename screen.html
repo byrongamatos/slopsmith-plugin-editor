@@ -1,4 +1,4 @@
-<div class="flex flex-col h-screen bg-dark-900 text-white overflow-hidden">
+<div class="flex flex-col h-screen pt-16 bg-dark-900 text-white overflow-hidden">
 
     <!-- Top bar: back + song info -->
     <div class="flex items-center gap-3 px-4 py-2 bg-dark-800 border-b border-gray-800 shrink-0">
@@ -19,7 +19,9 @@
     <div class="flex items-center gap-2 px-4 py-1.5 bg-dark-800 border-b border-gray-800 shrink-0 flex-wrap">
         <!-- File operations -->
         <button id="editor-load-btn" onclick="editorShowLoadModal()" class="px-3 py-1 bg-dark-600 hover:bg-dark-500 rounded text-xs font-medium">Load</button>
+        <button id="editor-create-btn" onclick="editorShowCreateModal()" class="px-3 py-1 bg-green-800 hover:bg-green-700 rounded text-xs font-medium">Create</button>
         <button id="editor-save-btn" onclick="editorSave()" class="px-3 py-1 bg-accent hover:bg-accent-light rounded text-xs font-medium" disabled>Save</button>
+        <button id="editor-build-btn" onclick="editorBuild()" class="px-3 py-1 bg-purple-800 hover:bg-purple-700 rounded text-xs font-medium hidden">Build CDLC</button>
 
         <div class="h-4 w-px bg-gray-700"></div>
 
@@ -46,6 +48,26 @@
         <button onclick="editorZoom(-1)" class="px-1.5 py-0.5 bg-dark-600 hover:bg-dark-500 rounded text-xs">-</button>
         <span id="editor-zoom-display" class="text-xs text-gray-400 w-8 text-center">100</span>
         <button onclick="editorZoom(1)" class="px-1.5 py-0.5 bg-dark-600 hover:bg-dark-500 rounded text-xs">+</button>
+
+        <div class="h-4 w-px bg-gray-700"></div>
+
+        <!-- BPM -->
+        <span class="text-xs text-gray-500">BPM:</span>
+        <input type="number" id="editor-bpm" min="30" max="400" step="0.1"
+            class="w-14 bg-dark-700 border border-gray-700 rounded px-1.5 py-0.5 text-xs text-gray-300 outline-none text-center"
+            value="120" onchange="editorSetBPM(this.value)" title="Change tab tempo — rescales all notes and beats">
+        <!-- Tempo sync -->
+        <button id="editor-sync-btn" onclick="editorSyncTempo()" class="px-2 py-0.5 bg-dark-600 hover:bg-dark-500 rounded text-xs hidden" title="Match tab tempo to audio">Sync</button>
+
+        <div class="h-4 w-px bg-gray-700"></div>
+
+        <!-- Offset -->
+        <span class="text-xs text-gray-500">Offset:</span>
+        <button onclick="editorNudgeOffset(-0.01)" class="px-1 py-0.5 bg-dark-600 hover:bg-dark-500 rounded text-xs" title="-10ms">&lt;</button>
+        <input type="number" id="editor-offset" step="0.01" value="0"
+            class="w-16 bg-dark-700 border border-gray-700 rounded px-1 py-0.5 text-xs text-gray-300 outline-none text-center"
+            onchange="editorApplyOffset(this.value)" title="Shift all notes by seconds (negative = earlier)">
+        <button onclick="editorNudgeOffset(0.01)" class="px-1 py-0.5 bg-dark-600 hover:bg-dark-500 rounded text-xs" title="+10ms">&gt;</button>
 
         <div class="h-4 w-px bg-gray-700"></div>
 
@@ -94,6 +116,117 @@
 
 <!-- Context menu -->
 <div id="editor-context-menu" class="hidden absolute z-50 bg-dark-700 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px]">
+</div>
+
+<!-- Create CDLC modal -->
+<div id="editor-create-modal" class="hidden absolute inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.7)">
+    <div class="bg-dark-700 rounded-xl border border-gray-700 w-full max-w-lg max-h-[85vh] flex flex-col overflow-y-auto">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
+            <span class="text-sm font-medium">Create New CDLC</span>
+            <button onclick="editorHideCreateModal()" class="text-gray-500 hover:text-white">&times;</button>
+        </div>
+        <div class="p-4 space-y-4">
+            <!-- Step 1: Guitar Pro file -->
+            <div>
+                <label class="text-xs font-medium text-gray-400 mb-1 block">Guitar Pro File (.gp3/.gp4/.gp5)</label>
+                <input type="file" id="editor-create-gp" accept=".gp3,.gp4,.gp5,.gpx,.gp"
+                    onchange="editorGPFileSelected(this)"
+                    class="w-full text-xs text-gray-400 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-dark-600 file:text-gray-300 hover:file:bg-dark-500">
+            </div>
+
+            <!-- Track selection (shown after GP upload) -->
+            <div id="editor-create-tracks" class="hidden">
+                <label class="text-xs font-medium text-gray-400 mb-1 block">Select Tracks</label>
+                <div id="editor-create-track-list" class="space-y-1 max-h-32 overflow-y-auto bg-dark-800 rounded p-2">
+                </div>
+            </div>
+
+            <!-- Step 2: Audio source -->
+            <div>
+                <label class="text-xs font-medium text-gray-400 mb-1 block">Audio Source</label>
+                <div class="flex gap-2 mb-2">
+                    <button onclick="editorSetAudioMode('file')" id="editor-audio-mode-file"
+                        class="px-3 py-1 bg-accent rounded text-xs">Upload File</button>
+                    <button onclick="editorSetAudioMode('youtube')" id="editor-audio-mode-yt"
+                        class="px-3 py-1 bg-dark-600 hover:bg-dark-500 rounded text-xs">YouTube URL</button>
+                </div>
+                <!-- File upload -->
+                <div id="editor-audio-file-input">
+                    <input type="file" id="editor-create-audio" accept=".mp3,.wav,.ogg,.m4a,.flac"
+                        class="w-full text-xs text-gray-400 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-dark-600 file:text-gray-300 hover:file:bg-dark-500">
+                </div>
+                <!-- YouTube URL -->
+                <div id="editor-audio-yt-input" class="hidden">
+                    <input type="text" id="editor-create-yt-url" placeholder="https://youtube.com/watch?v=..."
+                        class="w-full bg-dark-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-300 outline-none focus:border-accent/50">
+                </div>
+                <div id="editor-audio-status" class="text-xs text-gray-500 mt-1"></div>
+            </div>
+
+            <!-- Step 3: Metadata -->
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="text-xs text-gray-500">Title</label>
+                    <input type="text" id="editor-create-title" placeholder="Song Title"
+                        class="w-full bg-dark-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500">Artist</label>
+                    <input type="text" id="editor-create-artist" placeholder="Artist Name"
+                        class="w-full bg-dark-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500">Album</label>
+                    <input type="text" id="editor-create-album" placeholder="Album"
+                        class="w-full bg-dark-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-500">Year</label>
+                    <input type="text" id="editor-create-year" placeholder="2024"
+                        class="w-full bg-dark-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none">
+                </div>
+            </div>
+
+            <!-- Album art -->
+            <div>
+                <label class="text-xs text-gray-500">Album Art (optional)</label>
+                <input type="file" id="editor-create-art" accept=".png,.jpg,.jpeg,.dds"
+                    class="w-full text-xs text-gray-400 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-dark-600 file:text-gray-300 hover:file:bg-dark-500">
+            </div>
+
+            <!-- Import button -->
+            <button onclick="editorDoCreate()" id="editor-create-go"
+                class="w-full px-4 py-2 bg-green-700 hover:bg-green-600 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Import & Open in Editor
+            </button>
+            <div id="editor-create-status" class="text-xs text-gray-500"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Sync tempo dialog -->
+<div id="editor-sync-dialog" class="hidden absolute z-50 bg-dark-700 border border-gray-700 rounded-lg shadow-xl p-4 w-72">
+    <div class="text-xs font-medium text-gray-300 mb-3">Sync Tempo</div>
+    <div class="space-y-2 text-xs">
+        <div class="flex justify-between"><span class="text-gray-500">Tab BPM:</span><span id="sync-tab-bpm" class="text-gray-300">—</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Audio BPM:</span><span id="sync-audio-bpm" class="text-gray-300">—</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Scale factor:</span><span id="sync-factor" class="text-white font-mono">—</span></div>
+        <div>
+            <label class="text-gray-500">Manual audio BPM override:</label>
+            <input type="number" id="sync-manual-bpm" min="30" max="300" step="0.1" placeholder="auto"
+                class="w-full bg-dark-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none mt-1"
+                oninput="editorSyncUpdateFactor()">
+        </div>
+        <div>
+            <label class="text-gray-500">Time offset (seconds):</label>
+            <input type="number" id="sync-offset" step="0.01" value="0" placeholder="0"
+                class="w-full bg-dark-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none mt-1">
+        </div>
+    </div>
+    <div class="flex gap-2 mt-3">
+        <button onclick="editorApplySync()" class="flex-1 px-2 py-1 bg-accent hover:bg-accent-light rounded text-xs">Apply</button>
+        <button onclick="editorHideSyncDialog()" class="flex-1 px-2 py-1 bg-dark-600 hover:bg-dark-500 rounded text-xs">Cancel</button>
+    </div>
 </div>
 
 <!-- Add note dialog -->
