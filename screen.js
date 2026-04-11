@@ -28,6 +28,16 @@ const NOTE_PAD = 3;
 const SNAP_VALUES = [1, 0.5, 0.25, 0.125, 0.0625, 0]; // 1/1 … 1/16, off
 const DPR = window.devicePixelRatio || 1;
 
+// ── Piano roll constants ────────────────────────────────────────────
+const PIANO_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const PIANO_OCTAVE_COLORS = [
+    '#ff4466', '#ff8844', '#ffcc33', '#66dd55', '#44ccaa',
+    '#44aaff', '#7766ff', '#cc55ff', '#ff55aa', '#aaaaaa',
+];
+let PIANO_LANE_H = 10;  // pixels per MIDI semitone
+let pianoRange = { lo: 36, hi: 96 }; // MIDI range, updated per arrangement
+const KEYS_PATTERN = /^keys/i;
+
 // ════════════════════════════════════════════════════════════════════
 // State
 // ════════════════════════════════════════════════════════════════════
@@ -84,7 +94,48 @@ function strToLane(s) { return 5 - s; }
 function laneToStr(l) { return 5 - l; }
 function strToY(s)   { return laneToY(strToLane(s)); }
 function yToStr(y)   { const l = Math.max(0, Math.min(5, yToLane(y))); return laneToStr(l); }
-function canvasH()   { return WAVEFORM_H + LANES * LANE_H + BEAT_H; }
+function canvasH()   {
+    if (isKeysMode()) return WAVEFORM_H + pianoLaneCount() * PIANO_LANE_H + BEAT_H;
+    return WAVEFORM_H + LANES * LANE_H + BEAT_H;
+}
+
+// ── Piano roll mode helpers ─────────────────────────────────────────
+
+function isKeysMode() {
+    if (!S.arrangements.length) return false;
+    const arr = S.arrangements[S.currentArr];
+    return arr && KEYS_PATTERN.test(arr.name || '');
+}
+
+function pianoLaneCount() { return pianoRange.hi - pianoRange.lo + 1; }
+
+function midiToNote(midi) { return PIANO_NOTE_NAMES[midi % 12] + (Math.floor(midi / 12) - 1); }
+function isBlackKey(midi) { const pc = midi % 12; return pc===1||pc===3||pc===6||pc===8||pc===10; }
+
+function noteToMidi(string, fret) { return string * 24 + fret; }
+function midiToString(midi) { return Math.floor(midi / 24); }
+function midiToFret(midi) { return midi % 24; }
+
+// Piano roll Y: higher MIDI = higher on screen (lower Y)
+function midiToY(midi) { return WAVEFORM_H + (pianoRange.hi - midi) * PIANO_LANE_H; }
+function yToMidi(y) { return pianoRange.hi - Math.floor((y - WAVEFORM_H) / PIANO_LANE_H); }
+
+function updatePianoRange() {
+    const nn = notes();
+    let lo = 127, hi = 0;
+    for (const n of nn) {
+        const m = noteToMidi(n.string, n.fret);
+        if (m < lo) lo = m;
+        if (m > hi) hi = m;
+    }
+    if (lo > hi) { lo = 48; hi = 84; }
+    // Expand to octave boundaries with padding
+    lo = Math.max(0, Math.floor(lo / 12) * 12 - 6);
+    hi = Math.min(127, Math.ceil((hi + 1) / 12) * 12 + 5);
+    pianoRange = { lo, hi };
+    // Adjust lane height to fill available space nicely
+    PIANO_LANE_H = Math.max(6, Math.min(14, 350 / (hi - lo + 1)));
+}
 
 function snapTime(t) {
     const sv = SNAP_VALUES[S.snapIdx];
@@ -234,6 +285,7 @@ function drawWaveform(w) {
 }
 
 function drawLanes(w) {
+    if (isKeysMode()) return drawPianoLanes(w);
     for (let l = 0; l < LANES; l++) {
         const y = laneToY(l);
         ctx.fillStyle = l % 2 === 0 ? '#0c0c1c' : '#0f0f24';
@@ -248,9 +300,31 @@ function drawLanes(w) {
     }
 }
 
+function drawPianoLanes(w) {
+    for (let midi = pianoRange.lo; midi <= pianoRange.hi; midi++) {
+        const y = midiToY(midi);
+        const black = isBlackKey(midi);
+        ctx.fillStyle = black ? '#0a0a1a' : '#0e0e22';
+        ctx.fillRect(LABEL_W, y, w - LABEL_W, PIANO_LANE_H);
+
+        // Octave boundary (C notes)
+        if (midi % 12 === 0) {
+            ctx.strokeStyle = '#2a2a55';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(LABEL_W, y + PIANO_LANE_H);
+            ctx.lineTo(w, y + PIANO_LANE_H);
+            ctx.stroke();
+        }
+    }
+}
+
 function drawGrid(w) {
     const st = S.scrollX - 1;
     const et = S.scrollX + (w - LABEL_W) / S.zoom + 1;
+    const laneBottom = isKeysMode()
+        ? WAVEFORM_H + pianoLaneCount() * PIANO_LANE_H
+        : WAVEFORM_H + LANES * LANE_H;
     for (const b of S.beats) {
         if (b.time < st || b.time > et) continue;
         const x = timeToX(b.time);
@@ -260,7 +334,7 @@ function drawGrid(w) {
         ctx.lineWidth = meas ? 1.5 : 0.5;
         ctx.beginPath();
         ctx.moveTo(x, WAVEFORM_H);
-        ctx.lineTo(x, WAVEFORM_H + LANES * LANE_H);
+        ctx.lineTo(x, laneBottom);
         ctx.stroke();
     }
 }
@@ -268,6 +342,9 @@ function drawGrid(w) {
 function drawSections(w) {
     const st = S.scrollX - 1;
     const et = S.scrollX + (w - LABEL_W) / S.zoom + 1;
+    const laneBottom = isKeysMode()
+        ? WAVEFORM_H + pianoLaneCount() * PIANO_LANE_H
+        : WAVEFORM_H + LANES * LANE_H;
     ctx.font = '9px monospace';
     ctx.textBaseline = 'top';
     for (const s of S.sections) {
@@ -280,7 +357,7 @@ function drawSections(w) {
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
         ctx.moveTo(x, WAVEFORM_H);
-        ctx.lineTo(x, WAVEFORM_H + LANES * LANE_H);
+        ctx.lineTo(x, laneBottom);
         ctx.stroke();
         ctx.setLineDash([]);
         // Label at top of lanes
@@ -321,6 +398,8 @@ function drawLabels(w) {
     ctx.textBaseline = 'middle';
     ctx.fillText('Audio', LABEL_W / 2, WAVEFORM_H / 2);
 
+    if (isKeysMode()) return drawPianoLabels(w);
+
     // String labels
     for (let l = 0; l < LANES; l++) {
         const y = laneToY(l);
@@ -335,14 +414,39 @@ function drawLabels(w) {
     }
 }
 
+function drawPianoLabels() {
+    // MIDI note labels on the left axis
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let midi = pianoRange.lo; midi <= pianoRange.hi; midi++) {
+        const y = midiToY(midi);
+        ctx.fillStyle = '#0a0a1a';
+        ctx.fillRect(0, y, LABEL_W, PIANO_LANE_H);
+
+        // Only label C notes and F notes to avoid clutter
+        if (midi % 12 === 0 || midi % 12 === 5) {
+            const octave = Math.floor(midi / 12) - 1;
+            const color = PIANO_OCTAVE_COLORS[Math.min(octave + 1, PIANO_OCTAVE_COLORS.length - 1)];
+            ctx.fillStyle = color;
+            ctx.fillText(midiToNote(midi), LABEL_W / 2, y + PIANO_LANE_H / 2);
+        }
+    }
+}
+
 function drawNotes(w) {
     const nn = notes();
     const st = S.scrollX - 2;
     const et = S.scrollX + (w - LABEL_W) / S.zoom + 2;
+    const keysMode = isKeysMode();
     for (let i = 0; i < nn.length; i++) {
         const n = nn[i];
         if (n.time + (n.sustain || 0) < st || n.time > et) continue;
-        _drawNote(n, S.sel.has(i));
+        if (keysMode) {
+            _drawPianoNote(n, S.sel.has(i));
+        } else {
+            _drawNote(n, S.sel.has(i));
+        }
     }
 }
 
@@ -404,6 +508,45 @@ function _drawNote(n, selected) {
     }
 }
 
+function _drawPianoNote(n, selected) {
+    const midi = noteToMidi(n.string, n.fret);
+    if (midi < pianoRange.lo || midi > pianoRange.hi) return;
+
+    const x = timeToX(n.time);
+    const y = midiToY(midi) + 1;
+    const sw = Math.max(MIN_NOTE_W, (n.sustain || 0) * S.zoom);
+    const h = PIANO_LANE_H - 2;
+    const octave = Math.floor(midi / 12);
+    const color = PIANO_OCTAVE_COLORS[Math.min(octave, PIANO_OCTAVE_COLORS.length - 1)];
+
+    // Body
+    ctx.fillStyle = color + 'cc';
+    ctx.beginPath();
+    ctx.roundRect(x, y, sw, h, 2);
+    ctx.fill();
+
+    // Border
+    if (selected) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+    } else {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 0.5;
+    }
+    ctx.beginPath();
+    ctx.roundRect(x, y, sw, h, 2);
+    ctx.stroke();
+
+    // Note name (only if enough space)
+    if (sw >= 20 && h >= 8) {
+        ctx.fillStyle = '#000';
+        ctx.font = `bold ${Math.min(9, h - 1)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(midiToNote(midi), x + Math.min(sw, 24) / 2, y + h / 2);
+    }
+}
+
 function drawCursor(w, h) {
     const x = timeToX(S.cursorTime);
     if (x < LABEL_W || x > w) return;
@@ -438,12 +581,21 @@ const EDGE_GRAB = 8; // pixels from right edge to trigger resize
 
 function hitNote(mx, my) {
     const nn = notes();
+    const keysMode = isKeysMode();
     for (let i = nn.length - 1; i >= 0; i--) {
         const n = nn[i];
         const x = timeToX(n.time);
-        const y = strToY(n.string) + NOTE_PAD;
-        const w = Math.max(MIN_NOTE_W, (n.sustain || 0) * S.zoom);
-        const h = LANE_H - NOTE_PAD * 2;
+        let y, w, h;
+        if (keysMode) {
+            const midi = noteToMidi(n.string, n.fret);
+            y = midiToY(midi) + 1;
+            w = Math.max(MIN_NOTE_W, (n.sustain || 0) * S.zoom);
+            h = PIANO_LANE_H - 2;
+        } else {
+            y = strToY(n.string) + NOTE_PAD;
+            w = Math.max(MIN_NOTE_W, (n.sustain || 0) * S.zoom);
+            h = LANE_H - NOTE_PAD * 2;
+        }
         if (mx >= x && mx <= x + w && my >= y && my <= y + h) return i;
     }
     return -1;
@@ -482,16 +634,18 @@ class EditHistory {
 }
 
 class MoveNoteCmd {
-    constructor(indices, dtimes, dstrings) {
+    constructor(indices, dtimes, dstrings, dfrets) {
         this.indices = indices;
         this.dtimes = dtimes;
         this.dstrings = dstrings;
+        this.dfrets = dfrets; // null for guitar mode, array for piano mode
     }
     exec() {
         const nn = notes();
         for (let i = 0; i < this.indices.length; i++) {
             nn[this.indices[i]].time += this.dtimes[i];
             nn[this.indices[i]].string += this.dstrings[i];
+            if (this.dfrets) nn[this.indices[i]].fret += this.dfrets[i];
         }
     }
     rollback() {
@@ -499,6 +653,7 @@ class MoveNoteCmd {
         for (let i = 0; i < this.indices.length; i++) {
             nn[this.indices[i]].time -= this.dtimes[i];
             nn[this.indices[i]].string -= this.dstrings[i];
+            if (this.dfrets) nn[this.indices[i]].fret -= this.dfrets[i];
         }
     }
 }
@@ -640,6 +795,7 @@ function onMouseDown(e) {
             startX: x, startY: y,
             origTimes: selArr.map(i => nn[i].time),
             origStrings: selArr.map(i => nn[i].string),
+            origFrets: selArr.map(i => nn[i].fret),
             indices: selArr,
             moved: false,
         };
@@ -696,17 +852,32 @@ function onMouseMove(e) {
         const nn = notes();
         const dt = (x - S.drag.startX) / S.zoom;
         const dy = y - S.drag.startY;
-        const dLanes = Math.round(dy / LANE_H);
 
-        for (let i = 0; i < S.drag.indices.length; i++) {
-            const ni = S.drag.indices[i];
-            let newTime = S.drag.origTimes[i] + dt;
-            newTime = snapTime(Math.max(0, newTime));
-            nn[ni].time = newTime;
+        if (isKeysMode()) {
+            const dMidi = -Math.round(dy / PIANO_LANE_H);
+            for (let i = 0; i < S.drag.indices.length; i++) {
+                const ni = S.drag.indices[i];
+                let newTime = S.drag.origTimes[i] + dt;
+                newTime = snapTime(Math.max(0, newTime));
+                nn[ni].time = newTime;
 
-            const origLane = strToLane(S.drag.origStrings[i]);
-            const newLane = Math.max(0, Math.min(5, origLane + dLanes));
-            nn[ni].string = laneToStr(newLane);
+                const origMidi = noteToMidi(S.drag.origStrings[i], S.drag.origFrets[i]);
+                const newMidi = Math.max(0, Math.min(143, origMidi + dMidi));
+                nn[ni].string = midiToString(newMidi);
+                nn[ni].fret = midiToFret(newMidi);
+            }
+        } else {
+            const dLanes = Math.round(dy / LANE_H);
+            for (let i = 0; i < S.drag.indices.length; i++) {
+                const ni = S.drag.indices[i];
+                let newTime = S.drag.origTimes[i] + dt;
+                newTime = snapTime(Math.max(0, newTime));
+                nn[ni].time = newTime;
+
+                const origLane = strToLane(S.drag.origStrings[i]);
+                const newLane = Math.max(0, Math.min(5, origLane + dLanes));
+                nn[ni].string = laneToStr(newLane);
+            }
         }
         draw();
     }
@@ -731,13 +902,17 @@ function onMouseUp(e) {
         const nn = notes();
         const dtimes = S.drag.indices.map((ni, i) => nn[ni].time - S.drag.origTimes[i]);
         const dstrings = S.drag.indices.map((ni, i) => nn[ni].string - S.drag.origStrings[i]);
+        const dfrets = isKeysMode()
+            ? S.drag.indices.map((ni, i) => nn[ni].fret - S.drag.origFrets[i])
+            : null;
 
         // Revert to original first so exec() applies the delta
         for (let i = 0; i < S.drag.indices.length; i++) {
             nn[S.drag.indices[i]].time = S.drag.origTimes[i];
             nn[S.drag.indices[i]].string = S.drag.origStrings[i];
+            if (dfrets) nn[S.drag.indices[i]].fret = S.drag.origFrets[i];
         }
-        S.history.exec(new MoveNoteCmd(S.drag.indices, dtimes, dstrings));
+        S.history.exec(new MoveNoteCmd(S.drag.indices, dtimes, dstrings, dfrets));
     }
 
     if (S.drag.type === 'select') {
@@ -748,9 +923,16 @@ function onMouseUp(e) {
         const y2 = Math.max(S.drag.startY, S.drag.curY);
 
         const nn = notes();
+        const keysMode = isKeysMode();
         for (let i = 0; i < nn.length; i++) {
             const nx = timeToX(nn[i].time);
-            const ny = strToY(nn[i].string) + LANE_H / 2;
+            let ny;
+            if (keysMode) {
+                const midi = noteToMidi(nn[i].string, nn[i].fret);
+                ny = midiToY(midi) + PIANO_LANE_H / 2;
+            } else {
+                ny = strToY(nn[i].string) + LANE_H / 2;
+            }
             if (nx >= x1 && nx <= x2 && ny >= y1 && ny <= y2) {
                 S.sel.add(i);
             }
@@ -764,15 +946,24 @@ function onMouseUp(e) {
 
 function onDblClick(e) {
     const { x, y } = getMousePos(e);
-    if (y < WAVEFORM_H || y > WAVEFORM_H + LANES * LANE_H) return;
+    const keysMode = isKeysMode();
+    const laneBottom = keysMode
+        ? WAVEFORM_H + pianoLaneCount() * PIANO_LANE_H
+        : WAVEFORM_H + LANES * LANE_H;
+    if (y < WAVEFORM_H || y > laneBottom) return;
 
     const idx = hitNote(x, y);
     if (idx >= 0) return; // double-click on existing note = no-op
 
     // Show add-note dialog
     const t = snapTime(Math.max(0, xToTime(x)));
-    const s = yToStr(y);
-    showAddNote(e.clientX, e.clientY, t, s);
+    if (keysMode) {
+        const midi = yToMidi(y);
+        showAddNote(e.clientX, e.clientY, t, midiToString(midi), midiToFret(midi));
+    } else {
+        const s = yToStr(y);
+        showAddNote(e.clientX, e.clientY, t, s);
+    }
 }
 
 function onWheel(e) {
@@ -799,7 +990,9 @@ function onContextMenu(e) {
     const { x, y } = getMousePos(e);
 
     // Right-click on beat bar or lanes with no note = section menu
-    const beatBarY = WAVEFORM_H + LANES * LANE_H;
+    const beatBarY = isKeysMode()
+        ? WAVEFORM_H + pianoLaneCount() * PIANO_LANE_H
+        : WAVEFORM_H + LANES * LANE_H;
     if (y >= beatBarY || (y >= WAVEFORM_H && hitNote(x, y) < 0)) {
         showSectionMenu(e.clientX, e.clientY, xToTime(x));
         return;
@@ -1041,14 +1234,14 @@ function promptSlide(idx) {
 
 let addNoteData = null;
 
-function showAddNote(cx, cy, time, string) {
+function showAddNote(cx, cy, time, string, fret) {
     addNoteData = { time, string };
     const dlg = document.getElementById('editor-add-note-dialog');
     dlg.style.left = cx + 'px';
     dlg.style.top = cy + 'px';
     dlg.classList.remove('hidden');
     const inp = document.getElementById('editor-add-fret');
-    inp.value = '0';
+    inp.value = fret != null ? String(fret) : '0';
     inp.focus();
     inp.select();
 }
@@ -1223,6 +1416,7 @@ async function loadCDLC(filename) {
 
         // Flatten chord notes into main notes array for unified editing
         flattenChords();
+        if (isKeysMode()) updatePianoRange();
 
         // Update UI
         document.getElementById('editor-song-title').textContent =
@@ -1448,6 +1642,7 @@ window.editorSelectArrangement = (val) => {
     S.currentArr = parseInt(val) || 0;
     S.sel.clear();
     flattenChords();
+    if (isKeysMode()) updatePianoRange();
     draw();
     updateStatus();
 };
@@ -1723,14 +1918,18 @@ window.editorGPFileSelected = async (input) => {
 
         // Show track list
         const listEl = document.getElementById('editor-create-track-list');
-        listEl.innerHTML = data.tracks.map(t =>
-            `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
+        listEl.innerHTML = data.tracks.map(t => {
+            const badge = t.is_percussion ? ' (percussion)'
+                : t.is_piano ? ' (keys)'
+                : '';
+            const disabled = t.is_percussion || t.notes === 0;
+            return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
                 <input type="checkbox" value="${t.index}" checked
-                    class="accent-accent" ${t.is_percussion || t.notes === 0 ? 'disabled' : ''}>
-                <span class="${t.is_percussion ? 'text-gray-600' : ''}">${t.name}</span>
-                <span class="text-gray-600">${t.strings}str, ${t.notes} notes${t.is_percussion ? ' (percussion)' : ''}</span>
-            </label>`
-        ).join('');
+                    class="accent-accent" ${disabled ? 'disabled' : ''}>
+                <span class="${t.is_percussion ? 'text-gray-600' : t.is_piano ? 'text-indigo-300' : ''}">${t.name}</span>
+                <span class="text-gray-600">${t.strings}str, ${t.notes} notes${badge}</span>
+            </label>`;
+        }).join('');
         document.getElementById('editor-create-tracks').classList.remove('hidden');
 
         // Auto-fill title from filename
@@ -1862,6 +2061,7 @@ window.editorDoCreate = async () => {
         S.createMode = true;
 
         flattenChords();
+        if (isKeysMode()) updatePianoRange();
 
         document.getElementById('editor-song-title').textContent =
             `${S.artist} — ${S.title} (new)`;

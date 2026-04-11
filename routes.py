@@ -408,6 +408,154 @@ def setup(app, context):
         result["create_mode"] = True
         return result
 
+    # ── Import piano/keyboard tracks from a GP file ────────────────────
+
+    @app.post("/api/plugins/editor/import-keys")
+    async def import_keys_track(data: dict):
+        """Import a piano/keyboard track from a GP file and return as an arrangement."""
+        from lib.gp2rs import (
+            list_tracks, convert_piano_track, is_piano_track,
+            _build_tempo_map, _tick_to_seconds, GP_TICKS_PER_QUARTER,
+        )
+        from lib.song import parse_arrangement, Song, Beat, Section
+        import guitarpro
+
+        gp_path = data.get("gp_path", "")
+        track_index = data.get("track_index")
+        audio_offset = data.get("audio_offset", 0.0)
+
+        if not gp_path or not Path(gp_path).exists():
+            return JSONResponse({"error": "GP file not found"}, 400)
+        if track_index is None:
+            return JSONResponse({"error": "track_index required"}, 400)
+
+        def _convert():
+            song = guitarpro.parse(gp_path)
+            track = song.tracks[track_index]
+
+            if not is_piano_track(track):
+                # Still allow manual override — user picked this track
+                pass
+
+            xml_str = convert_piano_track(
+                song, track_index, audio_offset, "Keys"
+            )
+
+            # Write to temp file so we can parse it back
+            tmp = tempfile.mkdtemp(prefix="slopsmith_keys_")
+            xml_path = os.path.join(tmp, "Keys.xml")
+            Path(xml_path).write_text(xml_str)
+
+            arr = parse_arrangement(xml_path)
+            arr_data = {
+                "name": "Keys",
+                "tuning": arr.tuning,
+                "capo": arr.capo,
+                "notes": [],
+                "chords": [],
+                "chord_templates": [],
+            }
+
+            for n in arr.notes:
+                arr_data["notes"].append({
+                    "time": round(n.time, 3),
+                    "string": n.string,
+                    "fret": n.fret,
+                    "sustain": round(n.sustain, 3),
+                    "techniques": {
+                        "bend": n.bend,
+                        "slide_to": n.slide_to,
+                        "slide_unpitch_to": n.slide_unpitch_to,
+                        "hammer_on": n.hammer_on,
+                        "pull_off": n.pull_off,
+                        "harmonic": n.harmonic,
+                        "harmonic_pinch": n.harmonic_pinch,
+                        "palm_mute": n.palm_mute,
+                        "mute": n.mute,
+                        "tremolo": n.tremolo,
+                        "accent": n.accent,
+                        "tap": n.tap,
+                        "link_next": n.link_next,
+                    },
+                })
+
+            for ch in arr.chords:
+                chord_data = {
+                    "time": round(ch.time, 3),
+                    "chord_id": ch.chord_id,
+                    "high_density": ch.high_density,
+                    "notes": [],
+                }
+                for cn in ch.notes:
+                    chord_data["notes"].append({
+                        "time": round(cn.time, 3),
+                        "string": cn.string,
+                        "fret": cn.fret,
+                        "sustain": round(cn.sustain, 3),
+                        "techniques": {
+                            "bend": cn.bend,
+                            "slide_to": cn.slide_to,
+                            "slide_unpitch_to": cn.slide_unpitch_to,
+                            "hammer_on": cn.hammer_on,
+                            "pull_off": cn.pull_off,
+                            "harmonic": cn.harmonic,
+                            "palm_mute": cn.palm_mute,
+                            "mute": cn.mute,
+                            "tremolo": cn.tremolo,
+                            "accent": cn.accent,
+                            "tap": cn.tap,
+                            "link_next": cn.link_next,
+                        },
+                    })
+                arr_data["chords"].append(chord_data)
+
+            for ct in arr.chord_templates:
+                arr_data["chord_templates"].append({
+                    "name": ct.name,
+                    "frets": ct.frets,
+                    "fingers": ct.fingers,
+                })
+
+            return arr_data, tmp, xml_path
+
+        try:
+            arr_data, tmp_dir, xml_path = (
+                await asyncio.get_event_loop().run_in_executor(None, _convert)
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return JSONResponse({"error": str(e)}, 500)
+
+        return {"arrangement": arr_data, "tmp_dir": tmp_dir, "xml_path": xml_path}
+
+    # ── Add arrangement to existing session ──────────────────────────
+
+    @app.post("/api/plugins/editor/add-arrangement")
+    async def add_arrangement(data: dict):
+        """Add a new arrangement (e.g. Keys) to the current editing session."""
+        session_id = data.get("session_id", "")
+        session = sessions.get(session_id)
+        if not session:
+            return JSONResponse({"error": "No active session"}, 400)
+
+        arrangement = data.get("arrangement")
+        xml_path = data.get("xml_path", "")
+
+        if not arrangement:
+            return JSONResponse({"error": "arrangement data required"}, 400)
+
+        # If we have an XML path from import-keys, add it to session's xml_files
+        if xml_path and Path(xml_path).exists():
+            # Copy XML into session dir
+            dest = os.path.join(session["dir"], f"Keys_{len(session.get('xml_files', []))}.xml")
+            shutil.copy2(xml_path, dest)
+            if "xml_files" not in session:
+                session["xml_files"] = []
+            session["xml_files"].append(dest)
+
+        return {"success": True, "arrangement_count": len(session.get("xml_files", []))}
+
     # ── Build CDLC from create-mode session ──────────────────────────
 
     @app.post("/api/plugins/editor/build")
