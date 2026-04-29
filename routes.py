@@ -1,11 +1,13 @@
 """Arrangement Editor plugin — backend routes."""
 
 import asyncio
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
@@ -15,19 +17,18 @@ import base64
 from fastapi import UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 
+import yaml
+
 
 def setup(app, context):
     config_dir = context["config_dir"]
     get_dlc_dir = context["get_dlc_dir"]
 
-    from lib.song import load_song, arrangement_to_wire, arrangement_from_wire
+    from lib.song import load_song, phrase_to_wire
     from lib.psarc import unpack_psarc
     from lib.patcher import pack_psarc
     from lib.audio import find_wem_files, convert_wem
     from lib import sloppak as sloppak_mod
-    import json
-    import yaml
-    import zipfile
 
     STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
     SLOPPAK_CACHE = STATIC_DIR / "sloppak_cache"
@@ -36,7 +37,8 @@ def setup(app, context):
     sessions = {}
 
     def _arrangement_id(name: str, used: set) -> str:
-        """Map an arrangement name to a stable filesystem-safe id, avoiding collisions."""
+        """Map an arrangement name to a stable filesystem-safe id, avoiding
+        collisions (suffix counter starts at 2: bass, bass2, bass3, ...)."""
         base = re.sub(r"[^a-z0-9_]", "", (name or "arr").lower().replace(" ", "_")) or "arr"
         aid = base
         i = 2
@@ -45,6 +47,32 @@ def setup(app, context):
             i += 1
         used.add(aid)
         return aid
+
+    def _validate_editor_upload_path(path_str: str, prefix: str) -> Path | None:
+        """Resolve a client-supplied upload path and constrain it to the
+        editor's tempfile.mkdtemp(prefix=...) sandbox. Returns the resolved
+        path on success, or None if the path escapes the sandbox or doesn't
+        exist. Defends against import-keys / import-drums / import-keys-midi
+        being pointed at arbitrary readable files via the request body.
+        """
+        if not path_str:
+            return None
+        try:
+            resolved = Path(path_str).resolve()
+        except Exception:
+            return None
+        if not resolved.exists():
+            return None
+        tmp_root = Path(tempfile.gettempdir()).resolve()
+        try:
+            rel = resolved.relative_to(tmp_root)
+        except ValueError:
+            return None
+        # First component should be the mkdtemp dir whose name starts
+        # with our prefix (e.g. slopsmith_gp_XXXX).
+        if not rel.parts or not rel.parts[0].startswith(prefix):
+            return None
+        return resolved
 
     # ── List available CDLC files ────────────────────────────────────────
 
@@ -73,7 +101,18 @@ def setup(app, context):
             return JSONResponse({"error": "No filename"}, 400)
 
         dlc_dir = get_dlc_dir()
-        filepath = dlc_dir / filename
+        if not dlc_dir:
+            return JSONResponse({"error": "DLC folder not configured"}, 400)
+        filepath = (dlc_dir / filename).resolve()
+        # Constrain client-supplied filename to dlc_dir — defends against
+        # `../` traversal and absolute paths now that filename can include
+        # subdirectories.
+        try:
+            filepath.relative_to(dlc_dir.resolve())
+        except ValueError:
+            return JSONResponse({"error": "Invalid filename"}, 400)
+        if filepath.suffix not in (".psarc", ".sloppak"):
+            return JSONResponse({"error": "Unsupported file type"}, 400)
         if not filepath.exists():
             return JSONResponse({"error": "File not found"}, 404)
 
@@ -128,6 +167,11 @@ def setup(app, context):
             SLOPPAK_CACHE.mkdir(parents=True, exist_ok=True)
             loaded = sloppak_mod.load_song(filename, dlc_dir, SLOPPAK_CACHE)
             song = loaded.song
+            # Distinguish authoring (directory) form from distribution (zip)
+            # form so save knows whether to re-zip. With dir-form, source_dir
+            # *is* the original sloppak dir; rewriting the manifest +
+            # arrangement files in place is the whole save.
+            sloppak_form = "dir" if filepath.is_dir() else "zip"
 
             # Build a per-arrangement id list from the manifest so we can map
             # edits back to the correct JSON file on save.
@@ -157,8 +201,30 @@ def setup(app, context):
             result["format"] = "sloppak"
             # Carry the manifest-derived arrangement id list onto each
             # arrangement so the frontend can round-trip it back to us.
+            # Use a single `used_ids` set when generating fallback ids so two
+            # nameless arrangements don't both end up as "arr".
+            used_ids: set = {aid for aid in arrangement_ids if aid}
             for i, arr_data in enumerate(result.get("arrangements", [])):
-                arr_data["id"] = arrangement_ids[i] if i < len(arrangement_ids) else _arrangement_id(arr_data["name"], set())
+                aid = arrangement_ids[i] if i < len(arrangement_ids) else ""
+                if not aid:
+                    aid = _arrangement_id(arr_data["name"], used_ids)
+                arr_data["id"] = aid
+
+            # Round-trip-preserve the arrangement-level arrays the editor UI
+            # doesn't expose: anchors, handshapes, phrases. The save path
+            # passes them straight through so the next save doesn't drop them.
+            for i, arr in enumerate(song.arrangements):
+                arr_data = result["arrangements"][i]
+                arr_data["anchors"] = [
+                    {"time": a.time, "fret": a.fret, "width": a.width}
+                    for a in (arr.anchors or [])
+                ]
+                arr_data["handshapes"] = [
+                    {"chord_id": h.chord_id, "start_time": h.start_time, "end_time": h.end_time}
+                    for h in (arr.hand_shapes or [])
+                ]
+                if arr.phrases:
+                    arr_data["phrases"] = [phrase_to_wire(p) for p in arr.phrases]
 
             return (
                 result,
@@ -168,6 +234,8 @@ def setup(app, context):
                 {
                     "manifest": loaded.manifest,
                     "arrangement_ids": arrangement_ids,
+                    "form": sloppak_form,
+                    "original_path": str(filepath),
                 },
             )
 
@@ -243,7 +311,7 @@ def setup(app, context):
             )
 
             # Write XML
-            Path(xml_path).write_text(xml_str)
+            Path(xml_path).write_text(xml_str, encoding="utf-8")
 
             # Try to compile XML -> SNG
             _compile_sng(xml_path)
@@ -264,85 +332,80 @@ def setup(app, context):
         def _save_sloppak():
             sloppak_state = session.get("sloppak_state") or {}
             manifest = dict(sloppak_state.get("manifest") or {})
-            existing_ids = list(sloppak_state.get("arrangement_ids") or [])
-            source_dir = Path(session["dir"])
+            sloppak_form = sloppak_state.get("form") or "zip"
+            source_dir = Path(session["dir"]).resolve()
             dlc_dir = get_dlc_dir()
             filename = session["filename"]
-            output_path = dlc_dir / filename
+            output_path = (dlc_dir / filename).resolve()
+
+            # Build the wire JSON for one arrangement, preserving anchors,
+            # handshapes, and phrases from the loaded session (the editor
+            # UI doesn't expose them yet — pass them through verbatim).
+            def _build_wire(arr_dict, is_first):
+                wire = _arr_dict_to_wire(
+                    arr_dict.get("name", "arr"),
+                    arr_dict.get("tuning", [0]*6),
+                    int(arr_dict.get("capo", 0)),
+                    arr_dict.get("notes", []),
+                    arr_dict.get("chords", []),
+                    arr_dict.get("chord_templates", []),
+                )
+                wire["anchors"] = list(arr_dict.get("anchors") or [])
+                wire["handshapes"] = list(arr_dict.get("handshapes") or [])
+                ph = arr_dict.get("phrases")
+                if ph:
+                    wire["phrases"] = list(ph)
+                if is_first:
+                    wire["beats"] = [
+                        {"time": round(float(b.get("time", 0)), 3),
+                         "measure": int(b.get("measure", -1))}
+                        for b in beats
+                    ]
+                    wire["sections"] = [
+                        {"name": s.get("name", ""),
+                         "number": int(s.get("number", 0)),
+                         "time": round(float(s.get("start_time", 0)), 3)}
+                        for s in sections
+                    ]
+                return wire
 
             # Determine the arrangement set to write. If `arrangements` was
-            # provided, it's the authoritative full snapshot (handles adds
-            # and reorders). Otherwise we update only the single arrangement
-            # at arrangement_index using notes/chords/chord_templates.
+            # provided, it's the authoritative full snapshot (handles adds,
+            # removes, reorders). Otherwise we update only the single
+            # arrangement at arrangement_index from notes/chords/templates.
+            old_entries = list(manifest.get("arrangements", []) or [])
+
             if all_arrangements is None:
-                if arrangement_index >= len(existing_ids):
-                    raise RuntimeError("Invalid arrangement index")
-                # Fetch the current manifest entry for the edited arrangement
-                # so we keep its name/tuning/capo.
-                old_entries = manifest.get("arrangements", []) or []
                 if arrangement_index >= len(old_entries):
-                    raise RuntimeError("Manifest arrangement out of range")
+                    raise RuntimeError("Invalid arrangement index")
+                # Build a synthetic edited dict using the old entry's
+                # tuning/capo since the legacy save body doesn't carry them.
                 old_entry = old_entries[arrangement_index]
+                edited_dict = {
+                    "name": old_entry.get("name", ""),
+                    "tuning": old_entry.get("tuning", [0]*6),
+                    "capo": int(old_entry.get("capo", 0)),
+                    "notes": notes,
+                    "chords": chords,
+                    "chord_templates": chord_templates,
+                    # Anchors/handshapes/phrases aren't sent in the legacy
+                    # body — the next reload will pull them from disk via
+                    # the unedited arrangement JSON, so leave wire defaults.
+                    "anchors": [], "handshapes": [], "phrases": None,
+                }
                 merged_arrangements = []
-                # We need to reconstruct the wire data for the edited
-                # arrangement only; other arrangements stay untouched.
                 for i, entry in enumerate(old_entries):
-                    if i == arrangement_index:
-                        wire = _arr_dict_to_wire(
-                            entry.get("name", ""),
-                            entry.get("tuning", [0]*6),
-                            int(entry.get("capo", 0)),
-                            notes, chords, chord_templates,
-                        )
-                        # First arrangement carries beats/sections.
-                        if i == 0:
-                            wire["beats"] = [
-                                {"time": round(float(b.get("time", 0)), 3),
-                                 "measure": int(b.get("measure", -1))}
-                                for b in beats
-                            ]
-                            wire["sections"] = [
-                                {"name": s.get("name", ""),
-                                 "number": int(s.get("number", 0)),
-                                 "time": round(float(s.get("start_time", 0)), 3)}
-                                for s in sections
-                            ]
-                        merged_arrangements.append({
-                            "entry": entry,
-                            "wire": wire,
-                        })
-                    else:
-                        merged_arrangements.append({"entry": entry, "wire": None})
+                    wire = _build_wire(edited_dict, i == 0) if i == arrangement_index else None
+                    merged_arrangements.append({"entry": entry, "wire": wire})
             else:
-                # Full snapshot path — used when arrangements were added/removed
-                # or for safety on every save.
+                # Full snapshot path — used when arrangements were added/
+                # removed or for safety on every save.
                 used_ids: set = set()
                 merged_arrangements = []
-                first = True
                 for i, ad in enumerate(all_arrangements):
                     aid = ad.get("id") or _arrangement_id(ad.get("name", "arr"), used_ids)
                     used_ids.add(aid)
-                    wire = _arr_dict_to_wire(
-                        ad.get("name", "arr"),
-                        ad.get("tuning", [0]*6),
-                        int(ad.get("capo", 0)),
-                        ad.get("notes", []),
-                        ad.get("chords", []),
-                        ad.get("chord_templates", []),
-                    )
-                    if first:
-                        wire["beats"] = [
-                            {"time": round(float(b.get("time", 0)), 3),
-                             "measure": int(b.get("measure", -1))}
-                            for b in beats
-                        ]
-                        wire["sections"] = [
-                            {"name": s.get("name", ""),
-                             "number": int(s.get("number", 0)),
-                             "time": round(float(s.get("start_time", 0)), 3)}
-                            for s in sections
-                        ]
-                        first = False
+                    wire = _build_wire(ad, i == 0)
                     merged_arrangements.append({
                         "entry": {
                             "id": aid,
@@ -354,8 +417,8 @@ def setup(app, context):
                         "wire": wire,
                     })
 
-            # Write/update arrangement JSON files inside source_dir
-            arr_dir = source_dir / "arrangements"
+            # Write/update arrangement JSON files inside source_dir/arrangements
+            arr_dir = (source_dir / "arrangements").resolve()
             arr_dir.mkdir(parents=True, exist_ok=True)
             new_manifest_arrangements = []
             kept_paths: set[Path] = set()
@@ -363,9 +426,14 @@ def setup(app, context):
                 entry = item["entry"]
                 wire = item["wire"]
                 if wire is not None:
-                    # Determine target path — fall back to default if missing
                     rel = entry.get("file") or f"arrangements/{entry.get('id', 'arr')}.json"
-                    arr_path = source_dir / rel
+                    arr_path = (source_dir / rel).resolve()
+                    # Constrain writes to the arrangements/ subdir — defends
+                    # against `..` traversal in a malformed/buggy snapshot.
+                    try:
+                        arr_path.relative_to(arr_dir)
+                    except ValueError:
+                        raise RuntimeError(f"Arrangement path escapes sandbox: {rel}")
                     arr_path.parent.mkdir(parents=True, exist_ok=True)
                     arr_path.write_text(
                         json.dumps(wire, separators=(",", ":")),
@@ -373,22 +441,19 @@ def setup(app, context):
                     )
                     entry = dict(entry)
                     entry["file"] = rel
-                # Track every kept arrangement file (rewritten or untouched)
-                rel = entry.get("file")
-                if rel:
-                    kept_paths.add((source_dir / rel).resolve())
+                rel_kept = entry.get("file")
+                if rel_kept:
+                    kept_paths.add((source_dir / rel_kept).resolve())
                 new_manifest_arrangements.append(entry)
             manifest["arrangements"] = new_manifest_arrangements
 
-            # Drop orphaned arrangement JSONs (e.g. after a remove). Only
-            # touches files inside the arrangements/ subdir to be safe.
-            if arr_dir.exists():
-                for f in arr_dir.glob("*.json"):
-                    if f.resolve() not in kept_paths:
-                        try:
-                            f.unlink()
-                        except OSError:
-                            pass
+            # Drop orphaned arrangement JSONs (e.g. after a remove).
+            for f in arr_dir.glob("*.json"):
+                if f.resolve() not in kept_paths:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
 
             # Apply edited top-level metadata (title/artist/album/year only —
             # don't let the editor overwrite stems/lyrics/cover paths).
@@ -408,13 +473,17 @@ def setup(app, context):
                 encoding="utf-8",
             )
 
-            # Backup original .sloppak (zip) if not already
-            if output_path.exists():
+            # Directory-form sloppak: source_dir IS the sloppak — we've already
+            # rewritten everything in place. Don't try to zip on top of it.
+            if sloppak_form == "dir":
+                return str(output_path)
+
+            # Zip-form: back up the original and re-zip the source dir.
+            if output_path.exists() and output_path.is_file():
                 backup = dlc_dir / (filename + ".bak")
                 if not backup.exists():
                     shutil.copy2(output_path, backup)
 
-            # Re-zip the source dir into the .sloppak file
             output_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_zip = output_path.with_suffix(output_path.suffix + ".tmp")
             with zipfile.ZipFile(str(tmp_zip), "w", zipfile.ZIP_DEFLATED) as zf:
@@ -569,12 +638,14 @@ def setup(app, context):
         """Convert a MIDI track into a Keys arrangement (editor-ready dict)."""
         from lib.midi_import import convert_midi_track_to_keys_wire
 
-        midi_path = data.get("midi_path", "")
+        midi_path_raw = data.get("midi_path", "")
         track_index = data.get("track_index")
         audio_offset = float(data.get("audio_offset", 0.0))
 
-        if not midi_path or not Path(midi_path).exists():
+        validated = _validate_editor_upload_path(midi_path_raw, "slopsmith_midi_")
+        if not validated:
             return JSONResponse({"error": "MIDI file not found"}, 400)
+        midi_path = str(validated)
         if track_index is None:
             return JSONResponse({"error": "track_index required"}, 400)
 
@@ -643,8 +714,10 @@ def setup(app, context):
         album = data.get("album", "")
         year = data.get("year", "")
 
-        if not gp_path or not Path(gp_path).exists():
+        validated_gp = _validate_editor_upload_path(gp_path, "slopsmith_gp_")
+        if not validated_gp:
             return JSONResponse({"error": "GP file not found"}, 400)
+        gp_path = str(validated_gp)
 
         def _convert():
             tmp = tempfile.mkdtemp(prefix="slopsmith_editor_create_")
@@ -760,12 +833,14 @@ def setup(app, context):
         from lib.song import parse_arrangement, Song, Beat, Section
         import guitarpro
 
-        gp_path = data.get("gp_path", "")
+        gp_path_raw = data.get("gp_path", "")
         track_index = data.get("track_index")
         audio_offset = data.get("audio_offset", 0.0)
 
-        if not gp_path or not Path(gp_path).exists():
+        validated = _validate_editor_upload_path(gp_path_raw, "slopsmith_gp_")
+        if not validated:
             return JSONResponse({"error": "GP file not found"}, 400)
+        gp_path = str(validated)
         if track_index is None:
             return JSONResponse({"error": "track_index required"}, 400)
 
@@ -784,7 +859,7 @@ def setup(app, context):
             # Write to temp file so we can parse it back
             tmp = tempfile.mkdtemp(prefix="slopsmith_keys_")
             xml_path = os.path.join(tmp, "Keys.xml")
-            Path(xml_path).write_text(xml_str)
+            Path(xml_path).write_text(xml_str, encoding="utf-8")
 
             arr = parse_arrangement(xml_path)
             arr_data = {
@@ -881,12 +956,14 @@ def setup(app, context):
         from lib.song import parse_arrangement, Song, Beat, Section
         import guitarpro
 
-        gp_path = data.get("gp_path", "")
+        gp_path_raw = data.get("gp_path", "")
         track_index = data.get("track_index")
         audio_offset = data.get("audio_offset", 0.0)
 
-        if not gp_path or not Path(gp_path).exists():
+        validated = _validate_editor_upload_path(gp_path_raw, "slopsmith_gp_")
+        if not validated:
             return JSONResponse({"error": "GP file not found"}, 400)
+        gp_path = str(validated)
         if track_index is None:
             return JSONResponse({"error": "track_index required"}, 400)
 
@@ -900,7 +977,7 @@ def setup(app, context):
             # Write to temp file so we can parse it back
             tmp = tempfile.mkdtemp(prefix="slopsmith_drums_")
             xml_path = os.path.join(tmp, "Drums.xml")
-            Path(xml_path).write_text(xml_str)
+            Path(xml_path).write_text(xml_str, encoding="utf-8")
 
             arr = parse_arrangement(xml_path)
             arr_data = {
@@ -1086,7 +1163,7 @@ def setup(app, context):
                     old_root, arr_notes, arr_chords, arr_templates,
                     beats, sections, meta,
                 )
-                Path(xml_path).write_text(xml_str)
+                Path(xml_path).write_text(xml_str, encoding="utf-8")
 
             # Resolve audio file path from URL
             audio_file = ""

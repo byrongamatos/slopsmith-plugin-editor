@@ -1497,9 +1497,21 @@ async function showLoadModal() {
     document.getElementById('editor-load-search').focus();
 }
 
+// Escape a string for safe interpolation into innerHTML. Covers the five
+// chars that matter for HTML context (& must be first to avoid double-escape).
+function _editorEscHtml(s) {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function _normalizeSongList(raw) {
     // Backend now returns [{filename, format}] objects. Older deployments
-    // may still return plain string filenames — normalize either shape.
+    // may still return plain string filenames — normalize either shape and
+    // default missing fields so callers can rely on a consistent shape.
     return (raw || []).map(item => {
         if (typeof item === 'string') {
             return {
@@ -1507,25 +1519,42 @@ function _normalizeSongList(raw) {
                 format: item.endsWith('.sloppak') ? 'sloppak' : 'psarc',
             };
         }
-        return item;
+        const filename = String(item?.filename ?? '');
+        const format = String(item?.format
+            ?? (filename.endsWith('.sloppak') ? 'sloppak' : 'psarc'));
+        return { filename, format };
     });
 }
 
 function renderSongList(files) {
     const list = document.getElementById('editor-load-list');
     files = _normalizeSongList(files);
+    list.innerHTML = '';
     if (!files.length) {
         list.innerHTML = '<div class="text-xs text-gray-500 p-2">No CDLC files found</div>';
         return;
     }
-    list.innerHTML = files.map(f => {
-        const safe = f.filename.replace(/'/g, "\\'");
+    // Build the DOM imperatively so filenames never reach innerHTML.
+    for (const f of files) {
+        const btn = document.createElement('button');
+        btn.className = 'w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-dark-500 rounded flex items-center gap-2';
+        btn.addEventListener('click', () => editorLoadFile(f.filename));
+
+        const name = document.createElement('span');
+        name.className = 'flex-1 truncate';
+        name.textContent = f.filename;
+        btn.appendChild(name);
+
+        const badge = document.createElement('span');
         const badgeColor = f.format === 'sloppak'
             ? 'bg-green-900/40 text-green-300'
             : 'bg-blue-900/40 text-blue-300';
-        const badge = `<span class="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${badgeColor}">${f.format}</span>`;
-        return `<button onclick="editorLoadFile('${safe}')" class="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-dark-500 rounded flex items-center gap-2"><span class="flex-1 truncate">${f.filename}</span>${badge}</button>`;
-    }).join('');
+        badge.className = `px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${badgeColor}`;
+        badge.textContent = f.format;
+        btn.appendChild(badge);
+
+        list.appendChild(btn);
+    }
 }
 
 function filterSongs(q) {
@@ -1971,15 +2000,17 @@ window.editorGPFileSelected = async (input) => {
         // Show track list
         const listEl = document.getElementById('editor-create-track-list');
         listEl.innerHTML = data.tracks.map(t => {
-            const badge = t.is_drums ? ' (drums)'
+            const isDrums = !!(t.is_drums || t.is_percussion);
+            const badge = isDrums ? ' (drums)'
                 : t.is_piano ? ' (keys)'
                 : '';
             const disabled = t.notes === 0;
+            const safeName = _editorEscHtml(t.name);
             return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
                 <input type="checkbox" value="${t.index}" checked
                     class="accent-accent" ${disabled ? 'disabled' : ''}>
-                <span class="${t.is_drums ? 'text-red-300' : t.is_piano ? 'text-indigo-300' : ''}">${t.name}</span>
-                <span class="text-gray-600">${t.strings}str, ${t.notes} notes${badge}</span>
+                <span class="${isDrums ? 'text-red-300' : t.is_piano ? 'text-indigo-300' : ''}">${safeName}</span>
+                <span class="text-gray-600">${Number(t.strings) || 0}str, ${Number(t.notes) || 0} notes${badge}</span>
             </label>`;
         }).join('');
         document.getElementById('editor-create-tracks').classList.remove('hidden');
@@ -2324,8 +2355,9 @@ window.editorDrumsGPSelected = async (input) => {
         _addDrumsGpPath = data.gp_path;
         _addDrumsTracks = data.tracks;
 
-        // Show only drum/percussion tracks
-        const drumTracks = data.tracks.filter(t => t.is_drums && t.notes > 0);
+        // Show only drum/percussion tracks (accept legacy is_percussion alias
+        // from older slopsmith server.py revisions).
+        const drumTracks = data.tracks.filter(t => (t.is_drums || t.is_percussion) && t.notes > 0);
         if (drumTracks.length === 0) {
             statusEl.textContent = 'No drum/percussion tracks found in this file.';
             document.getElementById('editor-add-drums-tracks').classList.add('hidden');
@@ -2334,13 +2366,14 @@ window.editorDrumsGPSelected = async (input) => {
         }
 
         const listEl = document.getElementById('editor-add-drums-track-list');
-        listEl.innerHTML = drumTracks.map(t =>
-            `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
+        listEl.innerHTML = drumTracks.map(t => {
+            const safeName = _editorEscHtml(t.name);
+            return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
                 <input type="radio" name="drums-track" value="${t.index}" checked class="accent-red-500">
-                <span class="text-red-300">${t.name}</span>
-                <span class="text-gray-600">${t.notes} notes</span>
-            </label>`
-        ).join('');
+                <span class="text-red-300">${safeName}</span>
+                <span class="text-gray-600">${Number(t.notes) || 0} notes</span>
+            </label>`;
+        }).join('');
         document.getElementById('editor-add-drums-tracks').classList.remove('hidden');
         document.getElementById('editor-add-drums-go').disabled = false;
         statusEl.textContent = `Found ${drumTracks.length} drum track(s).`;
@@ -2482,13 +2515,15 @@ window.editorKeysFileSelected = async (input) => {
         const defaultIdx = firstPianoIdx >= 0 ? sorted[firstPianoIdx].index : sorted[0].index;
         listEl.innerHTML = sorted.map(t => {
             const checked = t.index === defaultIdx ? 'checked' : '';
+            const isDrums = !!(t.is_drums || t.is_percussion);
             const flag = t.is_piano ? '<span class="text-indigo-300">[keys]</span>' : '';
-            const drumsTag = t.is_drums ? '<span class="text-red-400">[drums]</span>' : '';
+            const drumsTag = isDrums ? '<span class="text-red-400">[drums]</span>' : '';
+            const safeName = _editorEscHtml(t.name || '') || ('Track ' + t.index);
             return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
                 <input type="radio" name="keys-track" value="${t.index}" ${checked} class="accent-indigo-500">
-                <span class="text-gray-200">${(t.name || '').replace(/</g, '&lt;') || ('Track ' + t.index)}</span>
+                <span class="text-gray-200">${safeName}</span>
                 ${flag} ${drumsTag}
-                <span class="text-gray-600 ml-auto">${t.notes || 0} notes</span>
+                <span class="text-gray-600 ml-auto">${Number(t.notes) || 0} notes</span>
             </label>`;
         }).join('');
         document.getElementById('editor-add-keys-tracks').classList.remove('hidden');
