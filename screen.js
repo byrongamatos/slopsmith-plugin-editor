@@ -1403,6 +1403,7 @@ async function loadCDLC(filename) {
         S.artist = data.artist || '';
         S.filename = filename;
         S.sessionId = data.session_id;
+        S.format = data.format || 'psarc';
         S.arrangements = data.arrangements || [];
         S.beats = data.beats || [];
         S.sections = data.sections || [];
@@ -1454,6 +1455,26 @@ function updateArrangementSelector() {
         sel.appendChild(opt);
     });
     sel.style.display = S.arrangements.length > 1 ? '' : 'none';
+
+    // Show "+ Drums" button when a session is active and no drums arrangement exists
+    const hasDrums = S.arrangements.some(a => /^drums/i.test(a.name || ''));
+    const drumsBtn = document.getElementById('editor-add-drums-btn');
+    if (drumsBtn) {
+        drumsBtn.classList.toggle('hidden', !S.sessionId || hasDrums);
+    }
+
+    // Show "+ Keys" button on sloppak sessions when no keys arrangement exists yet.
+    const hasKeys = S.arrangements.some(a => /keys|piano|keyboard|synth/i.test(a.name || ''));
+    const keysBtn = document.getElementById('editor-add-keys-btn');
+    if (keysBtn) {
+        keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak' || hasKeys);
+    }
+
+    // Show remove button when there are multiple arrangements
+    const removeBtn = document.getElementById('editor-remove-arr-btn');
+    if (removeBtn) {
+        removeBtn.classList.toggle('hidden', S.arrangements.length <= 1);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1476,21 +1497,42 @@ async function showLoadModal() {
     document.getElementById('editor-load-search').focus();
 }
 
+function _normalizeSongList(raw) {
+    // Backend now returns [{filename, format}] objects. Older deployments
+    // may still return plain string filenames — normalize either shape.
+    return (raw || []).map(item => {
+        if (typeof item === 'string') {
+            return {
+                filename: item,
+                format: item.endsWith('.sloppak') ? 'sloppak' : 'psarc',
+            };
+        }
+        return item;
+    });
+}
+
 function renderSongList(files) {
     const list = document.getElementById('editor-load-list');
+    files = _normalizeSongList(files);
     if (!files.length) {
         list.innerHTML = '<div class="text-xs text-gray-500 p-2">No CDLC files found</div>';
         return;
     }
-    list.innerHTML = files.map(f =>
-        `<button onclick="editorLoadFile('${f.replace(/'/g, "\\'")}')" class="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-dark-500 rounded truncate">${f}</button>`
-    ).join('');
+    list.innerHTML = files.map(f => {
+        const safe = f.filename.replace(/'/g, "\\'");
+        const badgeColor = f.format === 'sloppak'
+            ? 'bg-green-900/40 text-green-300'
+            : 'bg-blue-900/40 text-blue-300';
+        const badge = `<span class="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${badgeColor}">${f.format}</span>`;
+        return `<button onclick="editorLoadFile('${safe}')" class="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-dark-500 rounded flex items-center gap-2"><span class="flex-1 truncate">${f.filename}</span>${badge}</button>`;
+    }).join('');
 }
 
 function filterSongs(q) {
     if (!S.songsList) return;
+    const list = _normalizeSongList(S.songsList);
     const low = q.toLowerCase();
-    const filtered = S.songsList.filter(f => f.toLowerCase().includes(low));
+    const filtered = list.filter(f => f.filename.toLowerCase().includes(low));
     renderSongList(filtered);
 }
 
@@ -1506,19 +1548,29 @@ async function saveCDLC() {
     reconstructChords();
 
     const arr = S.arrangements[S.currentArr];
+    const body = {
+        session_id: S.sessionId,
+        arrangement_index: S.currentArr,
+        notes: arr.notes,
+        chords: arr.chords,
+        chord_templates: arr.chord_templates,
+        beats: S.beats,
+        sections: S.sections,
+    };
+    // Sloppak: send the full arrangement snapshot so adds/reorders persist
+    // and the per-arrangement files all stay current.
+    if (S.format === 'sloppak') {
+        body.arrangements = S.arrangements;
+        body.metadata = {
+            title: S.title,
+            artist: S.artist,
+        };
+    }
     try {
         const resp = await fetch('/api/plugins/editor/save', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: S.sessionId,
-                arrangement_index: S.currentArr,
-                notes: arr.notes,
-                chords: arr.chords,
-                chord_templates: arr.chord_templates,
-                beats: S.beats,
-                sections: S.sections,
-            }),
+            body: JSON.stringify(body),
         });
         const data = await resp.json();
         if (data.error) { setStatus('Save error: ' + data.error); return; }
@@ -1919,14 +1971,14 @@ window.editorGPFileSelected = async (input) => {
         // Show track list
         const listEl = document.getElementById('editor-create-track-list');
         listEl.innerHTML = data.tracks.map(t => {
-            const badge = t.is_percussion ? ' (percussion)'
+            const badge = t.is_drums ? ' (drums)'
                 : t.is_piano ? ' (keys)'
                 : '';
-            const disabled = t.is_percussion || t.notes === 0;
+            const disabled = t.notes === 0;
             return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
                 <input type="checkbox" value="${t.index}" checked
                     class="accent-accent" ${disabled ? 'disabled' : ''}>
-                <span class="${t.is_percussion ? 'text-gray-600' : t.is_piano ? 'text-indigo-300' : ''}">${t.name}</span>
+                <span class="${t.is_drums ? 'text-red-300' : t.is_piano ? 'text-indigo-300' : ''}">${t.name}</span>
                 <span class="text-gray-600">${t.strings}str, ${t.notes} notes${badge}</span>
             </label>`;
         }).join('');
@@ -2181,6 +2233,334 @@ function init() {
 
     draw();
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Remove arrangement
+// ════════════════════════════════════════════════════════════════════
+
+window.editorRemoveArrangement = async () => {
+    if (S.arrangements.length <= 1) return;
+    const removeIdx = S.currentArr;
+    const arr = S.arrangements[removeIdx];
+    if (!confirm(`Remove "${arr.name}" arrangement?`)) return;
+
+    // Remove from backend first
+    if (S.sessionId) {
+        try {
+            const resp = await fetch('/api/plugins/editor/remove-arrangement', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: S.sessionId,
+                    arrangement_index: removeIdx,
+                }),
+            });
+            const result = await resp.json();
+            if (result.error) {
+                setStatus('Remove failed: ' + result.error);
+                return;
+            }
+        } catch (e) {
+            setStatus('Remove failed: ' + e.message);
+            return;
+        }
+    }
+
+    // Then update frontend state
+    S.arrangements.splice(removeIdx, 1);
+    S.currentArr = Math.min(removeIdx, S.arrangements.length - 1);
+    S.sel.clear();
+    flattenChords();
+    updateArrangementSelector();
+    document.getElementById('editor-arrangement').value = S.currentArr;
+    updateStatus();
+    draw();
+    setStatus(`Removed "${arr.name}" arrangement`);
+};
+
+// ════════════════════════════════════════════════════════════════════
+// Add Drums arrangement from GP file
+// ════════════════════════════════════════════════════════════════════
+
+let _addDrumsGpPath = null;
+let _addDrumsTracks = [];
+
+window.editorShowAddDrumsModal = () => {
+    _addDrumsGpPath = null;
+    _addDrumsTracks = [];
+    document.getElementById('editor-add-drums-modal').classList.remove('hidden');
+    document.getElementById('editor-add-drums-tracks').classList.add('hidden');
+    document.getElementById('editor-add-drums-go').disabled = true;
+    document.getElementById('editor-add-drums-status').textContent = '';
+    const fileInput = document.getElementById('editor-add-drums-gp');
+    if (fileInput) fileInput.value = '';
+};
+
+window.editorHideAddDrumsModal = () => {
+    document.getElementById('editor-add-drums-modal').classList.add('hidden');
+};
+
+window.editorDrumsGPSelected = async (input) => {
+    const file = input.files[0];
+    if (!file) return;
+
+    const statusEl = document.getElementById('editor-add-drums-status');
+    statusEl.textContent = 'Parsing GP file...';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const resp = await fetch('/api/plugins/editor/import-gp', {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            return;
+        }
+
+        _addDrumsGpPath = data.gp_path;
+        _addDrumsTracks = data.tracks;
+
+        // Show only drum/percussion tracks
+        const drumTracks = data.tracks.filter(t => t.is_drums && t.notes > 0);
+        if (drumTracks.length === 0) {
+            statusEl.textContent = 'No drum/percussion tracks found in this file.';
+            document.getElementById('editor-add-drums-tracks').classList.add('hidden');
+            document.getElementById('editor-add-drums-go').disabled = true;
+            return;
+        }
+
+        const listEl = document.getElementById('editor-add-drums-track-list');
+        listEl.innerHTML = drumTracks.map(t =>
+            `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
+                <input type="radio" name="drums-track" value="${t.index}" checked class="accent-red-500">
+                <span class="text-red-300">${t.name}</span>
+                <span class="text-gray-600">${t.notes} notes</span>
+            </label>`
+        ).join('');
+        document.getElementById('editor-add-drums-tracks').classList.remove('hidden');
+        document.getElementById('editor-add-drums-go').disabled = false;
+        statusEl.textContent = `Found ${drumTracks.length} drum track(s).`;
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+    }
+};
+
+window.editorDoAddDrums = async () => {
+    if (!_addDrumsGpPath || !S.sessionId) return;
+
+    const statusEl = document.getElementById('editor-add-drums-status');
+    const goBtn = document.getElementById('editor-add-drums-go');
+    goBtn.disabled = true;
+    statusEl.textContent = 'Importing drum track...';
+
+    // Get selected track index
+    const radio = document.querySelector('input[name="drums-track"]:checked');
+    const trackIndex = radio ? parseInt(radio.value) : 0;
+
+    try {
+        // Import the drum track
+        const resp = await fetch('/api/plugins/editor/import-drums', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                gp_path: _addDrumsGpPath,
+                track_index: trackIndex,
+                audio_offset: S.offset || 0,
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            goBtn.disabled = false;
+            return;
+        }
+
+        // Add to current session
+        const addResp = await fetch('/api/plugins/editor/add-arrangement', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: S.sessionId,
+                arrangement: data.arrangement,
+                xml_path: data.xml_path,
+            }),
+        });
+        const addResult = await addResp.json();
+        if (addResult.error) {
+            statusEl.textContent = 'Error adding: ' + addResult.error;
+            goBtn.disabled = false;
+            return;
+        }
+
+        // Add the arrangement to local state
+        S.arrangements.push(data.arrangement);
+        S.currentArr = S.arrangements.length - 1;
+        const sel = document.getElementById('editor-arrangement');
+        sel.value = S.currentArr;
+
+        flattenChords();
+        updateArrangementSelector();
+        updateStatus();
+        draw();
+
+        editorHideAddDrumsModal();
+        setStatus('Added Drums arrangement (' + data.arrangement.notes.length + ' notes)');
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+        goBtn.disabled = false;
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════
+// Add Keys arrangement (sloppak — GP or MIDI source)
+// ════════════════════════════════════════════════════════════════════
+
+let _addKeysSourcePath = null;       // server-side path to the uploaded file
+let _addKeysSourceFormat = null;     // 'gp' or 'midi'
+
+window.editorShowAddKeysModal = () => {
+    if (S.format !== 'sloppak') return;
+    document.getElementById('editor-add-keys-modal').classList.remove('hidden');
+    document.getElementById('editor-add-keys-tracks').classList.add('hidden');
+    document.getElementById('editor-add-keys-go').disabled = true;
+    document.getElementById('editor-add-keys-status').textContent = '';
+    const fi = document.getElementById('editor-add-keys-file');
+    if (fi) fi.value = '';
+    _addKeysSourcePath = null;
+    _addKeysSourceFormat = null;
+};
+
+window.editorHideAddKeysModal = () => {
+    document.getElementById('editor-add-keys-modal').classList.add('hidden');
+};
+
+window.editorKeysFileSelected = async (input) => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const statusEl = document.getElementById('editor-add-keys-status');
+    statusEl.textContent = 'Parsing ' + file.name + '...';
+
+    const lower = file.name.toLowerCase();
+    const isMidi = lower.endsWith('.mid') || lower.endsWith('.midi');
+    _addKeysSourceFormat = isMidi ? 'midi' : 'gp';
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    try {
+        const url = isMidi
+            ? '/api/plugins/editor/import-midi'
+            : '/api/plugins/editor/import-gp';
+        const resp = await fetch(url, { method: 'POST', body: fd });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            return;
+        }
+        _addKeysSourcePath = isMidi ? data.midi_path : data.gp_path;
+        const tracks = data.tracks || [];
+        // Surface piano-flagged tracks first; include all so the user can override.
+        const sorted = tracks.slice().sort((a, b) => {
+            const ap = (a.is_piano ? 0 : 1);
+            const bp = (b.is_piano ? 0 : 1);
+            if (ap !== bp) return ap - bp;
+            return (b.notes || 0) - (a.notes || 0);
+        });
+
+        if (sorted.length === 0) {
+            statusEl.textContent = 'No tracks found in this file.';
+            document.getElementById('editor-add-keys-tracks').classList.add('hidden');
+            return;
+        }
+
+        const listEl = document.getElementById('editor-add-keys-track-list');
+        const firstPianoIdx = sorted.findIndex(t => t.is_piano);
+        const defaultIdx = firstPianoIdx >= 0 ? sorted[firstPianoIdx].index : sorted[0].index;
+        listEl.innerHTML = sorted.map(t => {
+            const checked = t.index === defaultIdx ? 'checked' : '';
+            const flag = t.is_piano ? '<span class="text-indigo-300">[keys]</span>' : '';
+            const drumsTag = t.is_drums ? '<span class="text-red-400">[drums]</span>' : '';
+            return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
+                <input type="radio" name="keys-track" value="${t.index}" ${checked} class="accent-indigo-500">
+                <span class="text-gray-200">${(t.name || '').replace(/</g, '&lt;') || ('Track ' + t.index)}</span>
+                ${flag} ${drumsTag}
+                <span class="text-gray-600 ml-auto">${t.notes || 0} notes</span>
+            </label>`;
+        }).join('');
+        document.getElementById('editor-add-keys-tracks').classList.remove('hidden');
+        document.getElementById('editor-add-keys-go').disabled = false;
+        const found = sorted.filter(t => t.is_piano).length;
+        statusEl.textContent = found > 0
+            ? `Found ${found} keyboard track(s). Pick one.`
+            : `No tracks auto-flagged as keyboard — pick one manually.`;
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+    }
+};
+
+window.editorDoAddKeys = async () => {
+    if (!_addKeysSourcePath || !S.sessionId) return;
+    const statusEl = document.getElementById('editor-add-keys-status');
+    const goBtn = document.getElementById('editor-add-keys-go');
+    goBtn.disabled = true;
+    statusEl.textContent = 'Importing keys track...';
+
+    const radio = document.querySelector('input[name="keys-track"]:checked');
+    const trackIndex = radio ? parseInt(radio.value) : 0;
+
+    try {
+        const url = _addKeysSourceFormat === 'midi'
+            ? '/api/plugins/editor/import-keys-midi'
+            : '/api/plugins/editor/import-keys';
+        const body = _addKeysSourceFormat === 'midi'
+            ? { midi_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: S.offset || 0 }
+            : { gp_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: S.offset || 0 };
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            goBtn.disabled = false;
+            return;
+        }
+
+        // Register the new arrangement with the server-side session (no-op for sloppak).
+        await fetch('/api/plugins/editor/add-arrangement', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: S.sessionId,
+                arrangement: data.arrangement,
+                xml_path: data.xml_path || '',
+            }),
+        });
+
+        // Append in-memory and switch to it
+        S.arrangements.push(data.arrangement);
+        S.currentArr = S.arrangements.length - 1;
+        const sel = document.getElementById('editor-arrangement');
+        sel.value = S.currentArr;
+
+        flattenChords();
+        if (typeof updatePianoRange === 'function') updatePianoRange();
+        updateArrangementSelector();
+        updateStatus();
+        draw();
+
+        editorHideAddKeysModal();
+        setStatus('Added Keys arrangement (' + data.arrangement.notes.length + ' notes). Save to commit.');
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+        goBtn.disabled = false;
+    }
+};
 
 // Run init after DOM is ready
 if (document.getElementById('editor-canvas')) {
