@@ -345,11 +345,14 @@ def setup(app, context):
         if not session:
             return JSONResponse({"error": "No active session"}, 400)
 
-        raw_arr_idx = data.get("arrangement_index", 0)
-        try:
-            arrangement_index = int(raw_arr_idx)
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "arrangement_index must be an integer"}, 400)
+        raw_arr_idx = data.get("arrangement_index")
+        if raw_arr_idx is None:
+            arrangement_index = 0
+        else:
+            try:
+                arrangement_index = int(raw_arr_idx)
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "arrangement_index must be an integer"}, 400)
         notes = data.get("notes", [])
         chords = data.get("chords", [])
         chord_templates = data.get("chord_templates", [])
@@ -1233,11 +1236,14 @@ def setup(app, context):
         if not session:
             return JSONResponse({"error": "No active session"}, 400)
 
-        raw_idx = data.get("arrangement_index", -1)
-        try:
-            idx = int(raw_idx)
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "arrangement_index must be an integer"}, 400)
+        raw_idx = data.get("arrangement_index")
+        if raw_idx is None:
+            idx = -1
+        else:
+            try:
+                idx = int(raw_idx)
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "arrangement_index must be an integer"}, 400)
 
         # Sloppak: nothing to remove server-side until save. The frontend
         # splices its in-memory arrangements and the next save rewrites
