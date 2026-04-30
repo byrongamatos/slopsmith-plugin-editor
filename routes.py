@@ -205,9 +205,10 @@ def setup(app, context):
                 rel = stem_entry.get("file", "")
                 if not rel:
                     return None
+                source_resolved = loaded.source_dir.resolve()
                 candidate = (loaded.source_dir / rel).resolve()
                 try:
-                    candidate.relative_to(loaded.source_dir.resolve())
+                    candidate.relative_to(source_resolved)
                 except ValueError:
                     return None
                 return candidate if candidate.exists() else None
