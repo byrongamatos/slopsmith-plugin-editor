@@ -398,6 +398,8 @@ def setup(app, context):
             sloppak_form = sloppak_state.get("form") or "zip"
             source_dir = Path(session["dir"]).resolve()
             dlc_dir = get_dlc_dir()
+            if not dlc_dir:
+                raise RuntimeError("DLC folder not configured")
             filename = session["filename"]
             output_path = (dlc_dir / filename).resolve()
 
@@ -450,14 +452,24 @@ def setup(app, context):
                 _preserved: dict = {}
                 _old_rel = old_entry.get("file")
                 if _old_rel:
-                    _old_path = source_dir / _old_rel
+                    _old_path = (source_dir / _old_rel).resolve()
+                    # Constrain reads to source_dir/arrangements — defends against
+                    # `..` traversal in a malformed or untrusted manifest.yaml.
+                    _arr_dir_resolved = (source_dir / "arrangements").resolve()
+                    _old_path_ok = False
                     try:
-                        _existing = json.loads(_old_path.read_text(encoding="utf-8"))
-                        for _k in ("anchors", "handshapes", "phrases"):
-                            if _k in _existing:
-                                _preserved[_k] = _existing[_k]
-                    except (OSError, json.JSONDecodeError):
+                        _old_path.relative_to(_arr_dir_resolved)
+                        _old_path_ok = True
+                    except ValueError:
                         pass
+                    if _old_path_ok:
+                        try:
+                            _existing = json.loads(_old_path.read_text(encoding="utf-8"))
+                            for _k in ("anchors", "handshapes", "phrases"):
+                                if _k in _existing:
+                                    _preserved[_k] = _existing[_k]
+                        except (OSError, json.JSONDecodeError):
+                            pass
                 edited_dict = {
                     "name": old_entry.get("name", ""),
                     "tuning": old_entry.get("tuning", [0]*6),
@@ -784,6 +796,10 @@ def setup(app, context):
             import traceback
             traceback.print_exc()
             return JSONResponse({"error": str(e)}, 500)
+
+        # Clean up the MIDI temp dir now that conversion is complete — the
+        # client no longer needs to reference midi_path after this response.
+        shutil.rmtree(Path(midi_path).parent, ignore_errors=True)
 
         return {"arrangement": arr_data}
 
