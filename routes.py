@@ -199,12 +199,25 @@ def setup(app, context):
             audio_url = None
             audio_file = None
             stem_path = None
+
+            def _safe_stem_path(stem_entry: dict) -> "Path | None":
+                """Resolve stem file path and reject traversal outside source_dir."""
+                rel = stem_entry.get("file", "")
+                if not rel:
+                    return None
+                candidate = (loaded.source_dir / rel).resolve()
+                try:
+                    candidate.relative_to(loaded.source_dir.resolve())
+                except ValueError:
+                    return None
+                return candidate if candidate.exists() else None
+
             for s in loaded.stems:
                 if s.get("id") == "full":
-                    stem_path = loaded.source_dir / s.get("file", "")
+                    stem_path = _safe_stem_path(s)
                     break
             if stem_path is None and loaded.stems:
-                stem_path = loaded.source_dir / loaded.stems[0].get("file", "")
+                stem_path = _safe_stem_path(loaded.stems[0])
             if stem_path and stem_path.exists():
                 # Same basename-collision class as session_id: nested paths
                 # like `foo/bar.psarc` and `baz/bar.sloppak` both reduce
@@ -682,7 +695,10 @@ def setup(app, context):
 
         midi_path_raw = data.get("midi_path", "")
         track_index = data.get("track_index")
-        audio_offset = float(data.get("audio_offset", 0.0))
+        try:
+            audio_offset = float(data.get("audio_offset", 0.0))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "audio_offset must be a number"}, 400)
         # Optional: when the picker entry came from a format-0 channel
         # split, this isolates the chosen channel out of the merged track.
         channel_filter_raw = data.get("channel_filter")
@@ -889,7 +905,10 @@ def setup(app, context):
 
         gp_path_raw = data.get("gp_path", "")
         track_index = data.get("track_index")
-        audio_offset = data.get("audio_offset", 0.0)
+        try:
+            audio_offset = float(data.get("audio_offset", 0.0))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "audio_offset must be a number"}, 400)
 
         validated = _validate_editor_upload_path(gp_path_raw, "slopsmith_gp_")
         if not validated:
@@ -1012,7 +1031,10 @@ def setup(app, context):
 
         gp_path_raw = data.get("gp_path", "")
         track_index = data.get("track_index")
-        audio_offset = data.get("audio_offset", 0.0)
+        try:
+            audio_offset = float(data.get("audio_offset", 0.0))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "audio_offset must be a number"}, 400)
 
         validated = _validate_editor_upload_path(gp_path_raw, "slopsmith_gp_")
         if not validated:

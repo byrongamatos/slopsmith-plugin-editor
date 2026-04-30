@@ -2600,7 +2600,7 @@ window.editorKeysFileSelected = async (input) => {
             const isDrums = !!(t.is_drums || t.is_percussion);
             const flag = t.is_piano ? '<span class="text-indigo-300">[keys]</span>' : '';
             const drumsTag = isDrums ? '<span class="text-red-400">[drums]</span>' : '';
-            const safeName = _editorEscHtml(t.name || '') || ('Track ' + t.index);
+            const safeName = _editorEscHtml(t.name || '') || _editorEscHtml('Track ' + t.index);
             return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
                 <input type="radio" name="keys-track" value="${pos}" ${checked} class="accent-indigo-500">
                 <span class="text-gray-200">${safeName}</span>
