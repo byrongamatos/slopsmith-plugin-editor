@@ -49,8 +49,17 @@ def setup(app, context):
     CACHE_URL = "/api/plugins/editor/cache"
 
     def _legacy_static_writable() -> bool:
+        # Writability alone isn't enough — when this plugin is installed
+        # into the user plugins dir (e.g. `~/.config/slopsmith-desktop/
+        # plugins/editor/`), `parent.parent.parent / static` resolves to
+        # a writable dir under the user config that Slopsmith does NOT
+        # mount as `/static`. Writing audio there would 404 on fetch.
+        # Require a sentinel file that Slopsmith always ships in its
+        # real static root (`app.js`) so we only short-circuit to legacy
+        # mode when this is genuinely the served mount.
+        if not (LEGACY_STATIC_DIR / "app.js").exists():
+            return False
         try:
-            LEGACY_STATIC_DIR.mkdir(parents=True, exist_ok=True)
             probe = LEGACY_STATIC_DIR / ".editor_write_probe"
             probe.touch()
             probe.unlink()
