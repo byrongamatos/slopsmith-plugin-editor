@@ -36,7 +36,12 @@ const PIANO_OCTAVE_COLORS = [
 ];
 let PIANO_LANE_H = 10;  // pixels per MIDI semitone
 let pianoRange = { lo: 36, hi: 96 }; // MIDI range, updated per arrangement
-const KEYS_PATTERN = /^keys/i;
+// Names that should open in keys (piano-roll) editor mode. Keep this in
+// sync with the `+ Keys` button visibility test below — a name that's
+// considered "already a keys arrangement" must also open in keys mode,
+// otherwise sloppaks authored as "Piano"/"Keyboard"/"Synth" would render
+// as 6-string charts while the add-keys button is hidden.
+const KEYS_PATTERN = /^(keys|piano|keyboard|synth)/i;
 
 // ════════════════════════════════════════════════════════════════════
 // State
@@ -1473,7 +1478,9 @@ function updateArrangementSelector() {
     }
 
     // Show "+ Keys" button on sloppak sessions when no keys arrangement exists yet.
-    const hasKeys = S.arrangements.some(a => /keys|piano|keyboard|synth/i.test(a.name || ''));
+    // Use the same predicate as isKeysMode() so the set of names treated as
+    // existing keys charts is exactly the set that opens in keys editor mode.
+    const hasKeys = S.arrangements.some(a => KEYS_PATTERN.test(a.name || ''));
     const keysBtn = document.getElementById('editor-add-keys-btn');
     if (keysBtn) {
         keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak' || hasKeys);
@@ -1742,6 +1749,18 @@ window.editorApplyOffset = (val) => {
     draw();
     setStatus(`Offset: ${offset >= 0 ? '+' : ''}${(offset * 1000).toFixed(0)}ms`);
 };
+
+// Effective audio offset to send when importing a new arrangement: the
+// song's loaded offset plus any UI-applied shift the user already made
+// via editorApplyOffset (which moves notes/beats but never updates
+// S.offset). Without this, a +Keys/+Drums import after a sync nudge
+// lands out of phase with the chart the user just realigned.
+function _effectiveAudioOffset() {
+    const base = Number(S.offset) || 0;
+    const el = document.getElementById('editor-offset');
+    const applied = el ? parseFloat(el.dataset.applied || '0') || 0 : 0;
+    return base + applied;
+}
 window.editorNudgeOffset = (delta) => {
     const el = document.getElementById('editor-offset');
     const current = parseFloat(el.value) || 0;
@@ -2441,7 +2460,7 @@ window.editorDoAddDrums = async () => {
             body: JSON.stringify({
                 gp_path: _addDrumsGpPath,
                 track_index: trackIndex,
-                audio_offset: S.offset || 0,
+                audio_offset: _effectiveAudioOffset(),
             }),
         });
         const data = await resp.json();
@@ -2620,10 +2639,11 @@ window.editorDoAddKeys = async () => {
         const url = _addKeysSourceFormat === 'midi'
             ? '/api/plugins/editor/import-keys-midi'
             : '/api/plugins/editor/import-keys';
+        const audioOffset = _effectiveAudioOffset();
         const body = _addKeysSourceFormat === 'midi'
-            ? { midi_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: S.offset || 0,
+            ? { midi_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: audioOffset,
                 channel_filter: channelFilter }
-            : { gp_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: S.offset || 0 };
+            : { gp_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: audioOffset };
         const resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

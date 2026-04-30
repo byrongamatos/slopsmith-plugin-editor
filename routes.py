@@ -1137,11 +1137,35 @@ def setup(app, context):
         xml_files = session.get("xml_files") or []
         if 0 <= idx < len(xml_files):
             removed = xml_files.pop(idx)
-            # Delete the XML file
+            # Delete the XML and every sidecar that pack_psarc would
+            # otherwise repack from the session dir. The CDLC layout
+            # stores per-arrangement assets keyed off the XML stem:
+            #   songs/arr/<stem>.xml          (this file)
+            #   songs/bin/generic/<stem>.sng  (compiled chart)
+            #   manifests/songs_dlc_*/<stem>.json (RS manifest)
+            # Without removing the .sng + manifest, the next save would
+            # repack a CDLC that still ships the "removed" arrangement.
+            xml_p = Path(removed)
+            stem = xml_p.stem
+            session_dir = Path(session.get("dir") or "")
+
             try:
-                Path(removed).unlink(missing_ok=True)
+                xml_p.unlink(missing_ok=True)
             except Exception:
                 pass
+
+            sng_path = xml_p.parent.parent / "bin" / "generic" / f"{stem}.sng"
+            try:
+                sng_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            if session_dir and session_dir.is_dir():
+                for manifest_json in session_dir.rglob(f"manifests/**/{stem}.json"):
+                    try:
+                        manifest_json.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
         return {"success": True, "arrangement_count": len(xml_files)}
 
