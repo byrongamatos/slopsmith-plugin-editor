@@ -94,20 +94,32 @@ def setup(app, context):
             return []
         files = []
         seen: set = set()
+        # Single os.walk pass so large libraries are traversed only once.
         # Sloppak has two valid forms: zip (`.sloppak` file) and authoring
-        # directory (`.sloppak/`). Use targeted globs so we avoid stat-ing
-        # every unrelated file in potentially large libraries.
-        for f in dlc_dir.rglob("*.sloppak"):
-            rel = str(f.relative_to(dlc_dir))
-            if rel not in seen:
-                seen.add(rel)
-                files.append({"filename": rel, "format": "sloppak"})
-        for f in dlc_dir.rglob("*.psarc"):
-            if f.is_file():
-                rel = str(f.relative_to(dlc_dir))
+        # directory (`.sloppak/`).  All suffixes are lowercased so that
+        # e.g. `.PSARC` / `.SLOPPAK` from older backends are handled correctly.
+        _FORMATS = {".sloppak": "sloppak", ".psarc": "psarc"}
+        for dirpath, dirnames, filenames in os.walk(dlc_dir):
+            dirnames.sort()
+            for name in filenames:
+                ext = os.path.splitext(name)[1].lower()
+                fmt = _FORMATS.get(ext)
+                if fmt is None:
+                    continue
+                full = Path(dirpath) / name
+                rel = str(full.relative_to(dlc_dir))
                 if rel not in seen:
                     seen.add(rel)
-                    files.append({"filename": rel, "format": "psarc"})
+                    files.append({"filename": rel, "format": fmt})
+            # Also check sub-dirs with a .sloppak suffix (authoring form).
+            for name in dirnames:
+                ext = os.path.splitext(name)[1].lower()
+                if ext == ".sloppak":
+                    full = Path(dirpath) / name
+                    rel = str(full.relative_to(dlc_dir))
+                    if rel not in seen:
+                        seen.add(rel)
+                        files.append({"filename": rel, "format": "sloppak"})
         files.sort(key=lambda x: x["filename"])
         return files
 
@@ -353,6 +365,8 @@ def setup(app, context):
                 arrangement_index = int(raw_arr_idx)
             except (TypeError, ValueError):
                 return JSONResponse({"error": "arrangement_index must be an integer"}, 400)
+        if arrangement_index < 0:
+            return JSONResponse({"error": "arrangement_index must be non-negative"}, 400)
         notes = data.get("notes", [])
         chords = data.get("chords", [])
         chord_templates = data.get("chord_templates", [])
@@ -1252,37 +1266,38 @@ def setup(app, context):
             return {"success": True, "arrangement_count": -1, "format": "sloppak"}
 
         xml_files = session.get("xml_files") or []
-        if 0 <= idx < len(xml_files):
-            removed = xml_files.pop(idx)
-            # Delete the XML and every sidecar that pack_psarc would
-            # otherwise repack from the session dir. The CDLC layout
-            # stores per-arrangement assets keyed off the XML stem:
-            #   songs/arr/<stem>.xml          (this file)
-            #   songs/bin/generic/<stem>.sng  (compiled chart)
-            #   manifests/songs_dlc_*/<stem>.json (RS manifest)
-            # Without removing the .sng + manifest, the next save would
-            # repack a CDLC that still ships the "removed" arrangement.
-            xml_p = Path(removed)
-            stem = xml_p.stem
-            session_dir = Path(session.get("dir") or "")
+        if not (0 <= idx < len(xml_files)):
+            return JSONResponse({"error": "arrangement_index out of range"}, 400)
+        removed = xml_files.pop(idx)
+        # Delete the XML and every sidecar that pack_psarc would
+        # otherwise repack from the session dir. The CDLC layout
+        # stores per-arrangement assets keyed off the XML stem:
+        #   songs/arr/<stem>.xml          (this file)
+        #   songs/bin/generic/<stem>.sng  (compiled chart)
+        #   manifests/songs_dlc_*/<stem>.json (RS manifest)
+        # Without removing the .sng + manifest, the next save would
+        # repack a CDLC that still ships the "removed" arrangement.
+        xml_p = Path(removed)
+        stem = xml_p.stem
+        session_dir = Path(session.get("dir") or "")
 
-            try:
-                xml_p.unlink(missing_ok=True)
-            except Exception:
-                pass
+        try:
+            xml_p.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-            sng_path = xml_p.parent.parent / "bin" / "generic" / f"{stem}.sng"
-            try:
-                sng_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        sng_path = xml_p.parent.parent / "bin" / "generic" / f"{stem}.sng"
+        try:
+            sng_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-            if session_dir and session_dir.is_dir():
-                for manifest_json in session_dir.rglob(f"manifests/**/{stem}.json"):
-                    try:
-                        manifest_json.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+        if session_dir and session_dir.is_dir():
+            for manifest_json in session_dir.rglob(f"manifests/**/{stem}.json"):
+                try:
+                    manifest_json.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         return {"success": True, "arrangement_count": len(xml_files)}
 
