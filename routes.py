@@ -200,6 +200,18 @@ def setup(app, context):
 
             result = _song_to_dict(song, audio_url)
             result["format"] = "sloppak"
+            # `lib/sloppak.load_song()` doesn't restore song.offset (the
+            # sloppak format doesn't carry an explicit offset field today),
+            # so song.offset is 0 here. If the manifest happens to surface
+            # one (e.g. a forward-compat extension that mirrors PSARC's
+            # song-level <offset>), pick it up so the audio_offset that
+            # gets fed to the +Keys/+Drums converters matches the chart.
+            try:
+                manifest_offset = float(loaded.manifest.get("offset", 0) or 0)
+            except (TypeError, ValueError):
+                manifest_offset = 0.0
+            if manifest_offset:
+                result["offset"] = manifest_offset
             # Carry the manifest-derived arrangement id list onto each
             # arrangement so the frontend can round-trip it back to us.
             # Use a single `used_ids` set when generating fallback ids so two
@@ -254,7 +266,16 @@ def setup(app, context):
             traceback.print_exc()
             return JSONResponse({"error": str(e)}, 500)
 
-        session_id = Path(filename).stem
+        # Session id has to disambiguate the full relative path, not just
+        # the basename — the picker now emits paths like `foo/bar.psarc`
+        # and `baz/bar.sloppak` that share the same stem, and a basename-
+        # keyed session would have two browser tabs collide on `bar`,
+        # corrupting the second's saves into the first's working dir.
+        # Sanitise path separators / spaces into a stable id (matches the
+        # `lib.sloppak._safe_id` convention) and append the suffix so a
+        # `.psarc` and `.sloppak` of the same name still get distinct ids.
+        sanitised = filename.replace("/", "__").replace("\\", "__").replace(" ", "_")
+        session_id = sanitised
         # Clean up previous PSARC session for same file (sloppak sessions
         # use the cache dir directly — never delete it on session swap).
         if session_id in sessions:
