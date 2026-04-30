@@ -494,8 +494,12 @@ def setup(app, context):
                 used_ids: set = set()
                 merged_arrangements = []
                 for i, ad in enumerate(all_arrangements):
-                    aid = ad.get("id") or _arrangement_id(ad.get("name", "arr"), used_ids)
-                    used_ids.add(aid)
+                    raw_id = ad.get("id") or ""
+                    if raw_id and raw_id not in used_ids:
+                        aid = raw_id
+                        used_ids.add(aid)
+                    else:
+                        aid = _arrangement_id(ad.get("name", "arr"), used_ids)
                     wire = _build_wire(ad, i == 0)
                     merged_arrangements.append({
                         "entry": {
@@ -774,10 +778,14 @@ def setup(app, context):
         midi_path = str(validated)
         if track_index is None:
             return JSONResponse({"error": "track_index required"}, 400)
+        try:
+            track_index = int(track_index)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "track_index must be an integer"}, 400)
 
         def _convert():
             wire = convert_midi_track_to_keys_wire(
-                midi_path, int(track_index), audio_offset, "Keys",
+                midi_path, track_index, audio_offset, "Keys",
                 channel_filter=channel_filter,
             )
             # Convert wire → editor's long-named shape so the frontend can
@@ -981,6 +989,10 @@ def setup(app, context):
         gp_path = str(validated)
         if track_index is None:
             return JSONResponse({"error": "track_index required"}, 400)
+        try:
+            track_index = int(track_index)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "track_index must be an integer"}, 400)
 
         def _convert():
             song = guitarpro.parse(gp_path)
@@ -1107,6 +1119,10 @@ def setup(app, context):
         gp_path = str(validated)
         if track_index is None:
             return JSONResponse({"error": "track_index required"}, 400)
+        try:
+            track_index = int(track_index)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "track_index must be an integer"}, 400)
 
         def _convert():
             song = guitarpro.parse(gp_path)

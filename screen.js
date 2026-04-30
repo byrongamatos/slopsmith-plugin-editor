@@ -202,7 +202,10 @@ function reconstructChords() {
     }
     const newNotes = [];
     const newChords = [];
-    const chordTemplates = arr.chord_templates || [];
+    // Always rebuild chord_templates from scratch so repeated saves don't
+    // accumulate duplicate entries (flattenChords has already emptied
+    // arr.chords, so the old templates are no longer referenced).
+    const chordTemplates = [];
     const templateMap = {};
 
     for (const key of Object.keys(byTime).sort((a, b) => parseFloat(a) - parseFloat(b))) {
@@ -1472,6 +1475,7 @@ function updateArrangementSelector() {
     // so an out-of-bounds S.currentArr doesn't render as a blank value.
     if (S.arrangements.length > 0) {
         const idx = Math.max(0, Math.min(S.currentArr || 0, S.arrangements.length - 1));
+        S.currentArr = idx;
         sel.value = String(idx);
     }
 
