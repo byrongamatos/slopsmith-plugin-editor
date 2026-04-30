@@ -1544,12 +1544,12 @@ function _normalizeSongList(raw) {
         if (typeof item === 'string') {
             return {
                 filename: item,
-                format: item.endsWith('.sloppak') ? 'sloppak' : 'psarc',
+                format: item.toLowerCase().endsWith('.sloppak') ? 'sloppak' : 'psarc',
             };
         }
         const filename = String(item?.filename ?? '');
         const format = String(item?.format
-            ?? (filename.endsWith('.sloppak') ? 'sloppak' : 'psarc'));
+            ?? (filename.toLowerCase().endsWith('.sloppak') ? 'sloppak' : 'psarc'));
         return { filename, format };
     });
 }
@@ -2379,11 +2379,9 @@ window.editorRemoveArrangement = async () => {
 // ════════════════════════════════════════════════════════════════════
 
 let _addDrumsGpPath = null;
-let _addDrumsTracks = [];
 
 window.editorShowAddDrumsModal = () => {
     _addDrumsGpPath = null;
-    _addDrumsTracks = [];
     document.getElementById('editor-add-drums-modal').classList.remove('hidden');
     document.getElementById('editor-add-drums-tracks').classList.add('hidden');
     document.getElementById('editor-add-drums-go').disabled = true;
@@ -2407,7 +2405,6 @@ window.editorDrumsGPSelected = async (input) => {
     // failure (or empty-tracks result) can't be silently committed via
     // editorDoAddDrums using the older file's path.
     _addDrumsGpPath = null;
-    _addDrumsTracks = [];
     document.getElementById('editor-add-drums-go').disabled = true;
     document.getElementById('editor-add-drums-tracks').classList.add('hidden');
 
@@ -2438,7 +2435,6 @@ window.editorDrumsGPSelected = async (input) => {
 
         // Only commit the new state once we know there's a usable track set.
         _addDrumsGpPath = data.gp_path;
-        _addDrumsTracks = tracks;
 
         const listEl = document.getElementById('editor-add-drums-track-list');
         listEl.innerHTML = drumTracks.map(t => {

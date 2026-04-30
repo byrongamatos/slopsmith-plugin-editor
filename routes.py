@@ -704,7 +704,29 @@ def setup(app, context):
         """Upload a MIDI file and return track listing."""
         from lib.midi_import import list_midi_tracks
 
-        suffix = Path(file.filename or "song.mid").suffix or ".mid"
+        # Validate extension — the browser accept filter is advisory only.
+        orig_suffix = Path(file.filename or "").suffix.lower()
+        if orig_suffix not in (".mid", ".midi"):
+            return JSONResponse(
+                {"error": "Only .mid/.midi files are accepted"}, 400
+            )
+
+        # Opportunistic TTL cleanup: remove any slopsmith_midi_* sandbox dirs
+        # older than 30 minutes so unclaimed uploads (cancelled modals, etc.)
+        # don't accumulate indefinitely on the server.
+        import time as _time
+        _ttl_secs = 30 * 60
+        _tmp_root = Path(tempfile.gettempdir())
+        for _stale in _tmp_root.glob("slopsmith_midi_*"):
+            try:
+                if _stale.is_dir():
+                    age = _time.time() - _stale.stat().st_mtime
+                    if age > _ttl_secs:
+                        shutil.rmtree(_stale, ignore_errors=True)
+            except OSError:
+                pass
+
+        suffix = orig_suffix or ".mid"
         tmp = tempfile.mkdtemp(prefix="slopsmith_midi_")
         midi_path = os.path.join(tmp, "upload" + suffix)
         content = await file.read()
