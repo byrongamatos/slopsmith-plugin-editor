@@ -31,18 +31,76 @@ def setup(app, context):
     from lib.audio import find_wem_files, convert_wem
     from lib import sloppak as sloppak_mod
 
-    STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
-    # The unpack cache must NOT live under STATIC_DIR — that directory is
-    # mounted as the public /static web root, so anything under it is
-    # downloadable by URL. Stems / manifests / covers of every loaded
-    # sloppak would leak. Use the shared private cache the server exposes
-    # via the plugin context (lives under CONFIG_DIR), with a fall-back
-    # for any older harness that doesn't surface the helper.
+    # The editor needs to write extracted audio / art into a directory it
+    # can also serve from. On the web Docker image `slopsmith/static/` is
+    # writable, so historically the plugin reused that path and surfaced
+    # the files at the slopsmith core's `/static/...` mount. On desktop
+    # bundles (AppImage / .app / NSIS install) `slopsmith/static/` lives
+    # inside the read-only application package, so writes blow up with
+    # `OSError: [Errno 30] Read-only file system`.
+    #
+    # Probe the legacy location at startup. If it's writable we keep the
+    # old behaviour; if not we fall back to a per-user cache dir under
+    # `config_dir` and serve those files via a dedicated plugin route.
+    # Read-back logic accepts BOTH URL prefixes so a song frontend hands
+    # back an old `/static/...` audio_url across upgrades still resolves.
+    LEGACY_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
+    LEGACY_STATIC_URL = "/static"
+    CACHE_URL = "/api/plugins/editor/cache"
+
+    def _legacy_static_writable() -> bool:
+        try:
+            LEGACY_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+            probe = LEGACY_STATIC_DIR / ".editor_write_probe"
+            probe.touch()
+            probe.unlink()
+            return True
+        except (OSError, PermissionError):
+            return False
+
+    if _legacy_static_writable():
+        STORAGE_DIR = LEGACY_STATIC_DIR
+        STORAGE_URL = LEGACY_STATIC_URL
+    else:
+        STORAGE_DIR = Path(config_dir) / "editor_cache"
+        STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        STORAGE_URL = CACHE_URL
+
+    # Sloppak unpack cache — must NOT live under STORAGE_DIR when STORAGE_URL
+    # is /static, because that directory is mounted as the public web root
+    # and anything under it is downloadable by URL. Stems / manifests /
+    # covers of every loaded sloppak would leak. Use the shared private
+    # cache the server exposes via the plugin context (lives under
+    # CONFIG_DIR), with a fall-back for any older harness that doesn't
+    # surface the helper.
     _get_sloppak_cache = context.get("get_sloppak_cache_dir")
     if callable(_get_sloppak_cache):
         SLOPPAK_CACHE = Path(_get_sloppak_cache())
     else:
         SLOPPAK_CACHE = config_dir / "sloppak_cache"
+
+    # Convenience for code that needs to resolve an audio_url back to a
+    # filesystem path — accepts the legacy /static/* form so a frontend
+    # session that captured an old URL still works after an upgrade.
+    def _resolve_storage_url(url: str) -> Path | None:
+        if not url:
+            return None
+        for prefix, base in (
+            (LEGACY_STATIC_URL + "/", LEGACY_STATIC_DIR),
+            (CACHE_URL + "/",         STORAGE_DIR if STORAGE_URL == CACHE_URL else None),
+        ):
+            if base is None:
+                continue
+            if url.startswith(prefix):
+                rel = url[len(prefix):]
+                # Path-traversal guard: resolved path must stay inside base.
+                candidate = (base / rel).resolve()
+                try:
+                    candidate.relative_to(base.resolve())
+                except ValueError:
+                    return None
+                return candidate
+        return None
 
     # Active editing sessions: session_id -> {dir, audio_file, filename, song_data}
     sessions = {}
@@ -84,6 +142,22 @@ def setup(app, context):
         if not rel.parts or not rel.parts[0].startswith(prefix):
             return None
         return resolved
+
+    # ── Cache file server (only meaningful when STORAGE_URL == CACHE_URL,
+    #    but registered unconditionally — the route 404s if a request
+    #    targets the cache on a build that's still using LEGACY_STATIC_DIR).
+    @app.get(CACHE_URL + "/{name:path}")
+    def get_cached_file(name: str):
+        if STORAGE_URL != CACHE_URL:
+            return JSONResponse({"error": "cache disabled (legacy static dir is writable)"}, status_code=404)
+        candidate = (STORAGE_DIR / name).resolve()
+        try:
+            candidate.relative_to(STORAGE_DIR.resolve())
+        except ValueError:
+            return JSONResponse({"error": "invalid path"}, status_code=400)
+        if not candidate.exists() or not candidate.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(candidate)
 
     # ── List available CDLC files ────────────────────────────────────────
 
@@ -180,9 +254,9 @@ def setup(app, context):
                     # and the session_id sanitisation.
                     audio_id = filename.replace("/", "__").replace("\\", "__").replace(" ", "_")
                     ext = Path(audio_path).suffix
-                    dest = STATIC_DIR / f"editor_audio_{audio_id}{ext}"
+                    dest = STORAGE_DIR / f"editor_audio_{audio_id}{ext}"
                     shutil.copy2(audio_path, dest)
-                    audio_url = f"/static/editor_audio_{audio_id}{ext}"
+                    audio_url = f"{STORAGE_URL}/editor_audio_{audio_id}{ext}"
                 except Exception as e:
                     print(f"[Editor] Audio conversion failed: {e}")
 
@@ -252,9 +326,9 @@ def setup(app, context):
                 # `editor_audio_*` file under STATIC_DIR.
                 audio_id = filename.replace("/", "__").replace("\\", "__").replace(" ", "_")
                 ext = stem_path.suffix
-                dest = STATIC_DIR / f"editor_audio_{audio_id}{ext}"
+                dest = STORAGE_DIR / f"editor_audio_{audio_id}{ext}"
                 shutil.copy2(stem_path, dest)
-                audio_url = f"/static/editor_audio_{audio_id}{ext}"
+                audio_url = f"{STORAGE_URL}/editor_audio_{audio_id}{ext}"
                 audio_file = str(stem_path)
 
             result = _song_to_dict(song, audio_url)
@@ -632,7 +706,7 @@ def setup(app, context):
     async def upload_art(file: UploadFile = File(...)):
         art_id = Path(file.filename).stem.replace(" ", "_")
         ext = Path(file.filename).suffix or ".png"
-        dest = STATIC_DIR / f"editor_art_{art_id}{ext}"
+        dest = STORAGE_DIR / f"editor_art_{art_id}{ext}"
         content = await file.read()
         dest.write_bytes(content)
         return {"art_path": str(dest)}
@@ -643,10 +717,10 @@ def setup(app, context):
     async def upload_audio(file: UploadFile = File(...)):
         audio_id = Path(file.filename).stem.replace(" ", "_")
         ext = Path(file.filename).suffix or ".mp3"
-        dest = STATIC_DIR / f"editor_audio_{audio_id}{ext}"
+        dest = STORAGE_DIR / f"editor_audio_{audio_id}{ext}"
         content = await file.read()
         dest.write_bytes(content)
-        return {"audio_url": f"/static/editor_audio_{audio_id}{ext}"}
+        return {"audio_url": f"{STORAGE_URL}/editor_audio_{audio_id}{ext}"}
 
     # ── Download audio from YouTube ──────────────────────────────────
 
@@ -681,11 +755,11 @@ def setup(app, context):
                     if f.suffix in (".mp3", ".m4a", ".ogg", ".wav"):
                         audio_id = re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:60]
                         ext = f.suffix
-                        dest = STATIC_DIR / f"editor_audio_{audio_id}{ext}"
+                        dest = STORAGE_DIR / f"editor_audio_{audio_id}{ext}"
                         shutil.copy2(f, dest)
                         shutil.rmtree(tmp, ignore_errors=True)
                         return {
-                            "audio_url": f"/static/editor_audio_{audio_id}{ext}",
+                            "audio_url": f"{STORAGE_URL}/editor_audio_{audio_id}{ext}",
                             "title": title,
                         }
 
@@ -953,9 +1027,9 @@ def setup(app, context):
             if audio_path and Path(audio_path).exists():
                 audio_id = re.sub(r"[^a-zA-Z0-9_-]", "_", title or "gp_import")[:60]
                 ext = Path(audio_path).suffix
-                dest = STATIC_DIR / f"editor_audio_{audio_id}{ext}"
+                dest = STORAGE_DIR / f"editor_audio_{audio_id}{ext}"
                 shutil.copy2(audio_path, dest)
-                audio_url = f"/static/editor_audio_{audio_id}{ext}"
+                audio_url = f"{STORAGE_URL}/editor_audio_{audio_id}{ext}"
 
             result = _song_to_dict(song, audio_url)
             return result, tmp, xml_paths
@@ -1380,10 +1454,11 @@ def setup(app, context):
                 )
                 Path(xml_path).write_text(xml_str, encoding="utf-8")
 
-            # Resolve audio file path from URL
-            audio_file = ""
-            if audio_url and audio_url.startswith("/static/"):
-                audio_file = str(STATIC_DIR / audio_url.replace("/static/", ""))
+            # Resolve audio file path from URL. Handles both the legacy
+            # /static/* form (web Docker) and the cache /api/plugins/editor/cache/*
+            # form (desktop bundles) — see _resolve_storage_url().
+            resolved = _resolve_storage_url(audio_url) if audio_url else None
+            audio_file = str(resolved) if resolved else ""
 
             if not audio_file or not Path(audio_file).exists():
                 raise RuntimeError("No audio file available for build")
