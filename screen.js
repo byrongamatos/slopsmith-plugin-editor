@@ -36,11 +36,9 @@ const PIANO_OCTAVE_COLORS = [
 ];
 let PIANO_LANE_H = 10;  // pixels per MIDI semitone
 let pianoRange = { lo: 36, hi: 96 }; // MIDI range, updated per arrangement
-// Names that should open in keys (piano-roll) editor mode. Keep this in
-// sync with the `+ Keys` button visibility test below — a name that's
-// considered "already a keys arrangement" must also open in keys mode,
-// otherwise sloppaks authored as "Piano"/"Keyboard"/"Synth" would render
-// as 6-string charts while the add-keys button is hidden.
+// Names that should open in keys (piano-roll) editor mode. Arrangements
+// named "Piano", "Keyboard", or "Synth" render as piano-roll charts rather
+// than 6-string guitar charts.
 const KEYS_PATTERN = /^(keys|piano|keyboard|synth)/i;
 
 // ════════════════════════════════════════════════════════════════════
@@ -124,7 +122,10 @@ function midiToFret(midi) { return midi % 24; }
 
 // Piano roll Y: higher MIDI = higher on screen (lower Y)
 function midiToY(midi) { return WAVEFORM_H + (pianoRange.hi - midi) * PIANO_LANE_H; }
-function yToMidi(y) { return pianoRange.hi - Math.floor((y - WAVEFORM_H) / PIANO_LANE_H); }
+function yToMidi(y) {
+    const m = pianoRange.hi - Math.floor((y - WAVEFORM_H) / PIANO_LANE_H);
+    return Math.max(pianoRange.lo, Math.min(pianoRange.hi, m));
+}
 
 // expandOnly=true preserves any wider current range (used during in-place
 // edits so adding a low note doesn't collapse the viewport and lose
@@ -156,8 +157,10 @@ function updatePianoRange(expandOnly = false) {
         nhi = Math.max(nhi, pianoRange.hi);
     }
     pianoRange = { lo: nlo, hi: nhi };
-    // Adjust lane height to fill available space nicely
-    PIANO_LANE_H = Math.max(6, Math.min(14, 350 / (nhi - nlo + 1)));
+    // Adjust lane height to fill available space nicely. Allow down to 4px
+    // so wide note ranges (many octaves) remain visible without overflowing
+    // the canvas wrapper.
+    PIANO_LANE_H = Math.max(4, Math.min(14, 350 / (nhi - nlo + 1)));
 }
 
 function snapTime(t) {
