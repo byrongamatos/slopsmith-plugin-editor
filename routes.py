@@ -458,6 +458,8 @@ def setup(app, context):
                     _arr_dir_resolved = (source_dir / "arrangements").resolve()
                     _old_path_ok = False
                     try:
+                        # Called only for the side-effect: raises ValueError
+                        # if _old_path escapes _arr_dir_resolved (path traversal).
                         _old_path.relative_to(_arr_dir_resolved)
                         _old_path_ok = True
                     except ValueError:
@@ -799,7 +801,11 @@ def setup(app, context):
 
         # Clean up the MIDI temp dir now that conversion is complete — the
         # client no longer needs to reference midi_path after this response.
-        shutil.rmtree(Path(midi_path).parent, ignore_errors=True)
+        try:
+            shutil.rmtree(Path(midi_path).parent)
+        except OSError as _cleanup_err:
+            import warnings
+            warnings.warn(f"Could not clean up MIDI temp dir: {_cleanup_err}")
 
         return {"arrangement": arr_data}
 
