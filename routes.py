@@ -92,14 +92,21 @@ def setup(app, context):
         if not dlc_dir or not dlc_dir.exists():
             return []
         files = []
-        for f in dlc_dir.rglob("*"):
-            # Sloppak has two valid forms: zip (`.sloppak` file) and
-            # authoring directory (`.sloppak/`). load_cdlc + _save_sloppak
-            # already handle both forms; the picker has to surface both too.
-            if f.suffix == ".sloppak":
-                files.append({"filename": str(f.relative_to(dlc_dir)), "format": "sloppak"})
-            elif f.is_file() and f.suffix == ".psarc":
-                files.append({"filename": str(f.relative_to(dlc_dir)), "format": "psarc"})
+        seen: set = set()
+        # Sloppak has two valid forms: zip (`.sloppak` file) and authoring
+        # directory (`.sloppak/`). Use targeted globs so we avoid stat-ing
+        # every unrelated file in potentially large libraries.
+        for f in dlc_dir.rglob("*.sloppak"):
+            rel = str(f.relative_to(dlc_dir))
+            if rel not in seen:
+                seen.add(rel)
+                files.append({"filename": rel, "format": "sloppak"})
+        for f in dlc_dir.rglob("*.psarc"):
+            if f.is_file():
+                rel = str(f.relative_to(dlc_dir))
+                if rel not in seen:
+                    seen.add(rel)
+                    files.append({"filename": rel, "format": "psarc"})
         files.sort(key=lambda x: x["filename"])
         return files
 
@@ -437,6 +444,20 @@ def setup(app, context):
                 # Build a synthetic edited dict using the old entry's
                 # tuning/capo since the legacy save body doesn't carry them.
                 old_entry = old_entries[arrangement_index]
+                # Load anchors/handshapes/phrases from the existing arrangement
+                # JSON on disk so they are preserved verbatim — the editor UI
+                # doesn't expose them, so the save body never includes them.
+                _preserved: dict = {}
+                _old_rel = old_entry.get("file")
+                if _old_rel:
+                    _old_path = source_dir / _old_rel
+                    try:
+                        _existing = json.loads(_old_path.read_text(encoding="utf-8"))
+                        for _k in ("anchors", "handshapes", "phrases"):
+                            if _k in _existing:
+                                _preserved[_k] = _existing[_k]
+                    except (OSError, json.JSONDecodeError):
+                        pass
                 edited_dict = {
                     "name": old_entry.get("name", ""),
                     "tuning": old_entry.get("tuning", [0]*6),
@@ -444,10 +465,9 @@ def setup(app, context):
                     "notes": notes,
                     "chords": chords,
                     "chord_templates": chord_templates,
-                    # Anchors/handshapes/phrases aren't sent in the legacy
-                    # body — the next reload will pull them from disk via
-                    # the unedited arrangement JSON, so leave wire defaults.
-                    "anchors": [], "handshapes": [], "phrases": None,
+                    "anchors": _preserved.get("anchors", []),
+                    "handshapes": _preserved.get("handshapes", []),
+                    "phrases": _preserved.get("phrases"),
                 }
                 merged_arrangements = []
                 for i, entry in enumerate(old_entries):

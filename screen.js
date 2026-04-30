@@ -50,6 +50,7 @@ const KEYS_PATTERN = /^(keys|piano|keyboard|synth)/i;
 const S = {
     // Song data
     title: '', artist: '', sessionId: null, filename: '',
+    format: 'psarc',
     arrangements: [],
     currentArr: 0,
     beats: [], sections: [], duration: 0, offset: 0,
@@ -1420,6 +1421,11 @@ async function loadCDLC(filename) {
         S.cursorTime = 0;
         S.history = new EditHistory();
 
+        // Reset offset UI so _effectiveAudioOffset() doesn't carry over a
+        // delta from a previous session's sync nudge into this one.
+        const _offsetEl = document.getElementById('editor-offset');
+        if (_offsetEl) { _offsetEl.value = '0'; _offsetEl.dataset.applied = '0'; }
+
         // Flatten chord notes into main notes array for unified editing
         flattenChords();
         if (isKeysMode()) updatePianoRange();
@@ -2179,6 +2185,7 @@ window.editorDoCreate = async () => {
         S.artist = data.artist || '';
         S.filename = '';
         S.sessionId = data.session_id;
+        S.format = 'psarc';
         S.arrangements = data.arrangements || [];
         S.beats = data.beats || [];
         S.sections = data.sections || [];
@@ -2190,6 +2197,11 @@ window.editorDoCreate = async () => {
         S.cursorTime = 0;
         S.history = new EditHistory();
         S.createMode = true;
+
+        // Reset offset UI so _effectiveAudioOffset() doesn't carry over a
+        // delta from a previous session's sync nudge.
+        const _offsetElC = document.getElementById('editor-offset');
+        if (_offsetElC) { _offsetElC.value = '0'; _offsetElC.dataset.applied = '0'; }
 
         flattenChords();
         if (isKeysMode()) updatePianoRange();
@@ -2480,9 +2492,9 @@ window.editorDoAddDrums = async () => {
                 xml_path: data.xml_path,
             }),
         });
-        const addResult = await addResp.json();
-        if (addResult.error) {
-            statusEl.textContent = 'Error adding: ' + addResult.error;
+        const addResult = await addResp.json().catch(() => ({}));
+        if (!addResp.ok || addResult.error) {
+            statusEl.textContent = 'Error adding: ' + (addResult.error || addResp.status);
             goBtn.disabled = false;
             return;
         }
@@ -2657,7 +2669,7 @@ window.editorDoAddKeys = async () => {
         }
 
         // Register the new arrangement with the server-side session (no-op for sloppak).
-        await fetch('/api/plugins/editor/add-arrangement', {
+        const addResp = await fetch('/api/plugins/editor/add-arrangement', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2666,6 +2678,12 @@ window.editorDoAddKeys = async () => {
                 xml_path: data.xml_path || '',
             }),
         });
+        const addData = await addResp.json().catch(() => ({}));
+        if (!addResp.ok || addData.error) {
+            statusEl.textContent = 'Error registering arrangement: ' + (addData.error || addResp.status);
+            goBtn.disabled = false;
+            return;
+        }
 
         // Append in-memory and switch to it
         S.arrangements.push(data.arrangement);
