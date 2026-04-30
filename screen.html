@@ -13,6 +13,7 @@
         <!-- Arrangement selector -->
         <select id="editor-arrangement" class="bg-dark-700 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none" onchange="editorSelectArrangement(this.value)" style="display:none">
         </select>
+        <button id="editor-remove-arr-btn" onclick="editorRemoveArrangement()" class="px-2 py-1 bg-dark-600 hover:bg-red-900 rounded text-xs text-gray-500 hover:text-red-300 transition hidden" title="Remove current arrangement">&times;</button>
     </div>
 
     <!-- Toolbar -->
@@ -22,6 +23,8 @@
         <button id="editor-create-btn" onclick="editorShowCreateModal()" class="px-3 py-1 bg-green-800 hover:bg-green-700 rounded text-xs font-medium">Create</button>
         <button id="editor-save-btn" onclick="editorSave()" class="px-3 py-1 bg-accent hover:bg-accent-light rounded text-xs font-medium" disabled>Save</button>
         <button id="editor-build-btn" onclick="editorBuild()" class="px-3 py-1 bg-purple-800 hover:bg-purple-700 rounded text-xs font-medium hidden">Build CDLC</button>
+        <button id="editor-add-drums-btn" onclick="editorShowAddDrumsModal()" class="px-3 py-1 bg-red-900 hover:bg-red-800 rounded text-xs font-medium hidden">+ Drums</button>
+        <button id="editor-add-keys-btn" onclick="editorShowAddKeysModal()" class="px-3 py-1 bg-indigo-900 hover:bg-indigo-800 rounded text-xs font-medium hidden">+ Keys</button>
 
         <div class="h-4 w-px bg-gray-700"></div>
 
@@ -226,6 +229,61 @@
     <div class="flex gap-2 mt-3">
         <button onclick="editorApplySync()" class="flex-1 px-2 py-1 bg-accent hover:bg-accent-light rounded text-xs">Apply</button>
         <button onclick="editorHideSyncDialog()" class="flex-1 px-2 py-1 bg-dark-600 hover:bg-dark-500 rounded text-xs">Cancel</button>
+    </div>
+</div>
+
+<!-- Add drums modal -->
+<div id="editor-add-drums-modal" class="hidden absolute inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.7)">
+    <div class="bg-dark-700 rounded-xl border border-gray-700 w-full max-w-md flex flex-col">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+            <span class="text-sm font-medium">Add Drum Arrangement</span>
+            <button onclick="editorHideAddDrumsModal()" class="text-gray-500 hover:text-white">&times;</button>
+        </div>
+        <div class="p-4 space-y-3">
+            <div>
+                <label class="text-xs font-medium text-gray-400 mb-1 block">Guitar Pro File with Drum Track</label>
+                <input type="file" id="editor-add-drums-gp" accept=".gp3,.gp4,.gp5,.gpx,.gp"
+                    onchange="editorDrumsGPSelected(this)"
+                    class="w-full text-xs text-gray-400 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-dark-600 file:text-gray-300 hover:file:bg-dark-500">
+            </div>
+            <div id="editor-add-drums-tracks" class="hidden">
+                <label class="text-xs font-medium text-gray-400 mb-1 block">Select Drum Track</label>
+                <div id="editor-add-drums-track-list" class="space-y-1 max-h-32 overflow-y-auto bg-dark-800 rounded p-2"></div>
+            </div>
+            <button onclick="editorDoAddDrums()" id="editor-add-drums-go"
+                class="w-full px-4 py-2 bg-red-700 hover:bg-red-600 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Import Drum Track
+            </button>
+            <div id="editor-add-drums-status" class="text-xs text-gray-500"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Add keys modal -->
+<div id="editor-add-keys-modal" class="hidden absolute inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.7)">
+    <div class="bg-dark-700 rounded-xl border border-gray-700 w-full max-w-md flex flex-col">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+            <span class="text-sm font-medium">Add Keys Arrangement</span>
+            <button onclick="editorHideAddKeysModal()" class="text-gray-500 hover:text-white">&times;</button>
+        </div>
+        <div class="p-4 space-y-3">
+            <div>
+                <label class="text-xs font-medium text-gray-400 mb-1 block">Source File (Guitar Pro or MIDI)</label>
+                <input type="file" id="editor-add-keys-file" accept=".gp3,.gp4,.gp5,.gpx,.gp,.mid,.midi"
+                    onchange="editorKeysFileSelected(this)"
+                    class="w-full text-xs text-gray-400 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-dark-600 file:text-gray-300 hover:file:bg-dark-500">
+                <p class="text-[11px] text-gray-600 mt-1">After import you can fine-tune note timing in the editor.</p>
+            </div>
+            <div id="editor-add-keys-tracks" class="hidden">
+                <label class="text-xs font-medium text-gray-400 mb-1 block">Select Keyboard Track</label>
+                <div id="editor-add-keys-track-list" class="space-y-1 max-h-40 overflow-y-auto bg-dark-800 rounded p-2"></div>
+            </div>
+            <button onclick="editorDoAddKeys()" id="editor-add-keys-go"
+                class="w-full px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Import Keys Track
+            </button>
+            <div id="editor-add-keys-status" class="text-xs text-gray-500"></div>
+        </div>
     </div>
 </div>
 

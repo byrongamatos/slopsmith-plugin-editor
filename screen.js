@@ -36,7 +36,12 @@ const PIANO_OCTAVE_COLORS = [
 ];
 let PIANO_LANE_H = 10;  // pixels per MIDI semitone
 let pianoRange = { lo: 36, hi: 96 }; // MIDI range, updated per arrangement
-const KEYS_PATTERN = /^keys/i;
+// Names that should open in keys (piano-roll) editor mode. Keep this in
+// sync with the `+ Keys` button visibility test below — a name that's
+// considered "already a keys arrangement" must also open in keys mode,
+// otherwise sloppaks authored as "Piano"/"Keyboard"/"Synth" would render
+// as 6-string charts while the add-keys button is hidden.
+const KEYS_PATTERN = /^(keys|piano|keyboard|synth)/i;
 
 // ════════════════════════════════════════════════════════════════════
 // State
@@ -45,6 +50,7 @@ const KEYS_PATTERN = /^keys/i;
 const S = {
     // Song data
     title: '', artist: '', sessionId: null, filename: '',
+    format: 'psarc',
     arrangements: [],
     currentArr: 0,
     beats: [], sections: [], duration: 0, offset: 0,
@@ -196,7 +202,10 @@ function reconstructChords() {
     }
     const newNotes = [];
     const newChords = [];
-    const chordTemplates = arr.chord_templates || [];
+    // Always rebuild chord_templates from scratch so repeated saves don't
+    // accumulate duplicate entries (flattenChords has already emptied
+    // arr.chords, so the old templates are no longer referenced).
+    const chordTemplates = [];
     const templateMap = {};
 
     for (const key of Object.keys(byTime).sort((a, b) => parseFloat(a) - parseFloat(b))) {
@@ -1403,6 +1412,7 @@ async function loadCDLC(filename) {
         S.artist = data.artist || '';
         S.filename = filename;
         S.sessionId = data.session_id;
+        S.format = data.format || 'psarc';
         S.arrangements = data.arrangements || [];
         S.beats = data.beats || [];
         S.sections = data.sections || [];
@@ -1413,6 +1423,10 @@ async function loadCDLC(filename) {
         S.scrollX = 0;
         S.cursorTime = 0;
         S.history = new EditHistory();
+
+        // Reset offset UI so _effectiveAudioOffset() doesn't carry over a
+        // delta from a previous session's sync nudge into this one.
+        _resetOffsetUI();
 
         // Flatten chord notes into main notes array for unified editing
         flattenChords();
@@ -1454,6 +1468,38 @@ function updateArrangementSelector() {
         sel.appendChild(opt);
     });
     sel.style.display = S.arrangements.length > 1 ? '' : 'none';
+    // Re-apply the active arrangement after the rebuild so callers that
+    // changed S.currentArr (e.g. + Keys / + Drums append, remove-arr)
+    // don't end up with a `<select>` snapped back to option 0 while the
+    // canvas edits the appended arrangement. Clamp to the valid range
+    // so an out-of-bounds S.currentArr doesn't render as a blank value.
+    if (S.arrangements.length > 0) {
+        const idx = Math.max(0, Math.min(S.currentArr || 0, S.arrangements.length - 1));
+        S.currentArr = idx;
+        sel.value = String(idx);
+    }
+
+    // Show "+ Drums" button when a session is active and no drums arrangement exists
+    const hasDrums = S.arrangements.some(a => /^drums/i.test(a.name || ''));
+    const drumsBtn = document.getElementById('editor-add-drums-btn');
+    if (drumsBtn) {
+        drumsBtn.classList.toggle('hidden', !S.sessionId || hasDrums);
+    }
+
+    // Show "+ Keys" button on sloppak sessions when no keys arrangement exists yet.
+    // Use the same predicate as isKeysMode() so the set of names treated as
+    // existing keys charts is exactly the set that opens in keys editor mode.
+    const hasKeys = S.arrangements.some(a => KEYS_PATTERN.test(a.name || ''));
+    const keysBtn = document.getElementById('editor-add-keys-btn');
+    if (keysBtn) {
+        keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak' || hasKeys);
+    }
+
+    // Show remove button when there are multiple arrangements
+    const removeBtn = document.getElementById('editor-remove-arr-btn');
+    if (removeBtn) {
+        removeBtn.classList.toggle('hidden', S.arrangements.length <= 1);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1476,21 +1522,78 @@ async function showLoadModal() {
     document.getElementById('editor-load-search').focus();
 }
 
+// Escape a string for safe interpolation into innerHTML. Covers the five
+// chars that matter for HTML context (& must be first to avoid double-escape).
+function _editorEscHtml(s) {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Reset the offset input and its applied-delta dataset, called when loading
+// any session so _effectiveAudioOffset() doesn't carry over a previous nudge.
+function _resetOffsetUI() {
+    const el = document.getElementById('editor-offset');
+    if (el) { el.value = '0'; el.dataset.applied = '0'; }
+}
+
+function _normalizeSongList(raw) {
+    // Backend now returns [{filename, format}] objects. Older deployments
+    // may still return plain string filenames — normalize either shape and
+    // default missing fields so callers can rely on a consistent shape.
+    return (raw || []).map(item => {
+        if (typeof item === 'string') {
+            return {
+                filename: item,
+                format: item.toLowerCase().endsWith('.sloppak') ? 'sloppak' : 'psarc',
+            };
+        }
+        const filename = String(item?.filename ?? '');
+        const format = String(item?.format
+            ?? (filename.toLowerCase().endsWith('.sloppak') ? 'sloppak' : 'psarc'));
+        return { filename, format };
+    });
+}
+
 function renderSongList(files) {
     const list = document.getElementById('editor-load-list');
+    files = _normalizeSongList(files);
+    list.innerHTML = '';
     if (!files.length) {
         list.innerHTML = '<div class="text-xs text-gray-500 p-2">No CDLC files found</div>';
         return;
     }
-    list.innerHTML = files.map(f =>
-        `<button onclick="editorLoadFile('${f.replace(/'/g, "\\'")}')" class="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-dark-500 rounded truncate">${f}</button>`
-    ).join('');
+    // Build the DOM imperatively so filenames never reach innerHTML.
+    for (const f of files) {
+        const btn = document.createElement('button');
+        btn.className = 'w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-dark-500 rounded flex items-center gap-2';
+        btn.addEventListener('click', () => editorLoadFile(f.filename));
+
+        const name = document.createElement('span');
+        name.className = 'flex-1 truncate';
+        name.textContent = f.filename;
+        btn.appendChild(name);
+
+        const badge = document.createElement('span');
+        const badgeColor = f.format === 'sloppak'
+            ? 'bg-green-900/40 text-green-300'
+            : 'bg-blue-900/40 text-blue-300';
+        badge.className = `px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${badgeColor}`;
+        badge.textContent = f.format;
+        btn.appendChild(badge);
+
+        list.appendChild(btn);
+    }
 }
 
 function filterSongs(q) {
     if (!S.songsList) return;
+    const list = _normalizeSongList(S.songsList);
     const low = q.toLowerCase();
-    const filtered = S.songsList.filter(f => f.toLowerCase().includes(low));
+    const filtered = list.filter(f => f.filename.toLowerCase().includes(low));
     renderSongList(filtered);
 }
 
@@ -1502,23 +1605,53 @@ async function saveCDLC() {
     if (!S.sessionId) return;
     setStatus('Saving...');
 
-    // Reconstruct chords from notes at the same time position
-    reconstructChords();
+    // Sloppak save sends the full S.arrangements snapshot, so every
+    // arrangement (not just the active one) needs its chords reconstructed.
+    // Tab-switching only flattens the new currentArr — non-current
+    // arrangements may be in any of three states: never flattened
+    // (chords:[chord_groups], notes:[regular notes only]), flattened-and-
+    // -unreconstructed (chords:[], notes:[regular + flattened chord notes
+    // tagged with _fromChord]), or already round-tripped through both.
+    // Running flatten→reconstruct on every arrangement normalises them all:
+    // flatten is a no-op on already-flattened ones, and reconstruct rebuilds
+    // the chord groups by time. PSARC saves only emit S.currentArr so they
+    // keep the existing single-pass call.
+    const savedArr = S.currentArr;
+    if (S.format === 'sloppak') {
+        for (let i = 0; i < S.arrangements.length; i++) {
+            S.currentArr = i;
+            flattenChords();
+            reconstructChords();
+        }
+        S.currentArr = savedArr;
+    } else {
+        reconstructChords();
+    }
 
     const arr = S.arrangements[S.currentArr];
+    const body = {
+        session_id: S.sessionId,
+        arrangement_index: S.currentArr,
+        notes: arr.notes,
+        chords: arr.chords,
+        chord_templates: arr.chord_templates,
+        beats: S.beats,
+        sections: S.sections,
+    };
+    // Sloppak: send the full arrangement snapshot so adds/reorders persist
+    // and the per-arrangement files all stay current.
+    if (S.format === 'sloppak') {
+        body.arrangements = S.arrangements;
+        body.metadata = {
+            title: S.title,
+            artist: S.artist,
+        };
+    }
     try {
         const resp = await fetch('/api/plugins/editor/save', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: S.sessionId,
-                arrangement_index: S.currentArr,
-                notes: arr.notes,
-                chords: arr.chords,
-                chord_templates: arr.chord_templates,
-                beats: S.beats,
-                sections: S.sections,
-            }),
+            body: JSON.stringify(body),
         });
         const data = await resp.json();
         if (data.error) { setStatus('Save error: ' + data.error); return; }
@@ -1632,6 +1765,18 @@ window.editorApplyOffset = (val) => {
     draw();
     setStatus(`Offset: ${offset >= 0 ? '+' : ''}${(offset * 1000).toFixed(0)}ms`);
 };
+
+// Effective audio offset to send when importing a new arrangement: the
+// song's loaded offset plus any UI-applied shift the user already made
+// via editorApplyOffset (which moves notes/beats but never updates
+// S.offset). Without this, a +Keys/+Drums import after a sync nudge
+// lands out of phase with the chart the user just realigned.
+function _effectiveAudioOffset() {
+    const base = Number(S.offset) || 0;
+    const el = document.getElementById('editor-offset');
+    const applied = el ? parseFloat(el.dataset.applied || '0') || 0 : 0;
+    return base + applied;
+}
 window.editorNudgeOffset = (delta) => {
     const el = document.getElementById('editor-offset');
     const current = parseFloat(el.value) || 0;
@@ -1919,15 +2064,17 @@ window.editorGPFileSelected = async (input) => {
         // Show track list
         const listEl = document.getElementById('editor-create-track-list');
         listEl.innerHTML = data.tracks.map(t => {
-            const badge = t.is_percussion ? ' (percussion)'
+            const isDrums = !!(t.is_drums || t.is_percussion);
+            const badge = isDrums ? ' (drums)'
                 : t.is_piano ? ' (keys)'
                 : '';
-            const disabled = t.is_percussion || t.notes === 0;
+            const disabled = t.notes === 0;
+            const safeName = _editorEscHtml(t.name);
             return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
                 <input type="checkbox" value="${t.index}" checked
                     class="accent-accent" ${disabled ? 'disabled' : ''}>
-                <span class="${t.is_percussion ? 'text-gray-600' : t.is_piano ? 'text-indigo-300' : ''}">${t.name}</span>
-                <span class="text-gray-600">${t.strings}str, ${t.notes} notes${badge}</span>
+                <span class="${isDrums ? 'text-red-300' : t.is_piano ? 'text-indigo-300' : ''}">${safeName}</span>
+                <span class="text-gray-600">${Number(t.strings) || 0}str, ${Number(t.notes) || 0} notes${badge}</span>
             </label>`;
         }).join('');
         document.getElementById('editor-create-tracks').classList.remove('hidden');
@@ -2048,6 +2195,7 @@ window.editorDoCreate = async () => {
         S.artist = data.artist || '';
         S.filename = '';
         S.sessionId = data.session_id;
+        S.format = 'psarc';
         S.arrangements = data.arrangements || [];
         S.beats = data.beats || [];
         S.sections = data.sections || [];
@@ -2059,6 +2207,10 @@ window.editorDoCreate = async () => {
         S.cursorTime = 0;
         S.history = new EditHistory();
         S.createMode = true;
+
+        // Reset offset UI so _effectiveAudioOffset() doesn't carry over a
+        // delta from a previous session's sync nudge.
+        _resetOffsetUI();
 
         flattenChords();
         if (isKeysMode()) updatePianoRange();
@@ -2181,6 +2333,382 @@ function init() {
 
     draw();
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Remove arrangement
+// ════════════════════════════════════════════════════════════════════
+
+window.editorRemoveArrangement = async () => {
+    if (S.arrangements.length <= 1) return;
+    const removeIdx = S.currentArr;
+    const arr = S.arrangements[removeIdx];
+    if (!confirm(`Remove "${arr.name}" arrangement?`)) return;
+
+    // Remove from backend first
+    if (S.sessionId) {
+        try {
+            const resp = await fetch('/api/plugins/editor/remove-arrangement', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: S.sessionId,
+                    arrangement_index: removeIdx,
+                }),
+            });
+            const result = await resp.json();
+            if (result.error) {
+                setStatus('Remove failed: ' + result.error);
+                return;
+            }
+        } catch (e) {
+            setStatus('Remove failed: ' + e.message);
+            return;
+        }
+    }
+
+    // Then update frontend state
+    S.arrangements.splice(removeIdx, 1);
+    S.currentArr = Math.min(removeIdx, S.arrangements.length - 1);
+    S.sel.clear();
+    flattenChords();
+    updateArrangementSelector();
+    document.getElementById('editor-arrangement').value = S.currentArr;
+    updateStatus();
+    draw();
+    setStatus(`Removed "${arr.name}" arrangement`);
+};
+
+// ════════════════════════════════════════════════════════════════════
+// Add Drums arrangement from GP file
+// ════════════════════════════════════════════════════════════════════
+
+let _addDrumsGpPath = null;
+
+window.editorShowAddDrumsModal = () => {
+    _addDrumsGpPath = null;
+    document.getElementById('editor-add-drums-modal').classList.remove('hidden');
+    document.getElementById('editor-add-drums-tracks').classList.add('hidden');
+    document.getElementById('editor-add-drums-go').disabled = true;
+    document.getElementById('editor-add-drums-status').textContent = '';
+    const fileInput = document.getElementById('editor-add-drums-gp');
+    if (fileInput) fileInput.value = '';
+};
+
+window.editorHideAddDrumsModal = () => {
+    document.getElementById('editor-add-drums-modal').classList.add('hidden');
+};
+
+window.editorDrumsGPSelected = async (input) => {
+    const file = input.files[0];
+    if (!file) return;
+
+    const statusEl = document.getElementById('editor-add-drums-status');
+    statusEl.textContent = 'Parsing GP file...';
+
+    // Drop any state from a previous successful parse so a later parse
+    // failure (or empty-tracks result) can't be silently committed via
+    // editorDoAddDrums using the older file's path.
+    _addDrumsGpPath = null;
+    document.getElementById('editor-add-drums-go').disabled = true;
+    document.getElementById('editor-add-drums-tracks').classList.add('hidden');
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const resp = await fetch('/api/plugins/editor/import-gp', {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            return;
+        }
+
+        // Show only drum/percussion tracks (accept legacy is_percussion alias
+        // from older slopsmith server.py revisions).
+        const tracks = data.tracks || [];
+        const drumTracks = tracks.filter(t => (t.is_drums || t.is_percussion) && t.notes > 0);
+        if (drumTracks.length === 0) {
+            statusEl.textContent = 'No drum/percussion tracks found in this file.';
+            // Leave the cleared state from above in place — no usable
+            // tracks means editorDoAddDrums must remain disabled.
+            return;
+        }
+
+        // Only commit the new state once we know there's a usable track set.
+        _addDrumsGpPath = data.gp_path;
+
+        const listEl = document.getElementById('editor-add-drums-track-list');
+        listEl.innerHTML = drumTracks.map(t => {
+            const safeName = _editorEscHtml(t.name);
+            return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
+                <input type="radio" name="drums-track" value="${t.index}" checked class="accent-red-500">
+                <span class="text-red-300">${safeName}</span>
+                <span class="text-gray-600">${Number(t.notes) || 0} notes</span>
+            </label>`;
+        }).join('');
+        document.getElementById('editor-add-drums-tracks').classList.remove('hidden');
+        document.getElementById('editor-add-drums-go').disabled = false;
+        statusEl.textContent = `Found ${drumTracks.length} drum track(s).`;
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+    }
+};
+
+window.editorDoAddDrums = async () => {
+    if (!_addDrumsGpPath || !S.sessionId) return;
+
+    const statusEl = document.getElementById('editor-add-drums-status');
+    const goBtn = document.getElementById('editor-add-drums-go');
+    goBtn.disabled = true;
+    statusEl.textContent = 'Importing drum track...';
+
+    // Get selected track index
+    const radio = document.querySelector('input[name="drums-track"]:checked');
+    const trackIndex = radio ? parseInt(radio.value) : 0;
+
+    try {
+        // Import the drum track
+        const resp = await fetch('/api/plugins/editor/import-drums', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                gp_path: _addDrumsGpPath,
+                track_index: trackIndex,
+                audio_offset: _effectiveAudioOffset(),
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            goBtn.disabled = false;
+            return;
+        }
+
+        // Add to current session
+        const addResp = await fetch('/api/plugins/editor/add-arrangement', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: S.sessionId,
+                arrangement: data.arrangement,
+                xml_path: data.xml_path,
+            }),
+        });
+        const addResult = await addResp.json().catch(() => ({}));
+        if (!addResp.ok || addResult.error) {
+            statusEl.textContent = 'Error adding: ' + (addResult.error || addResp.status);
+            goBtn.disabled = false;
+            return;
+        }
+
+        // Add the arrangement to local state
+        S.arrangements.push(data.arrangement);
+        S.currentArr = S.arrangements.length - 1;
+        const sel = document.getElementById('editor-arrangement');
+        sel.value = S.currentArr;
+
+        flattenChords();
+        updateArrangementSelector();
+        updateStatus();
+        draw();
+
+        editorHideAddDrumsModal();
+        setStatus('Added Drums arrangement (' + data.arrangement.notes.length + ' notes)');
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+        goBtn.disabled = false;
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════
+// Add Keys arrangement (sloppak — GP or MIDI source)
+// ════════════════════════════════════════════════════════════════════
+
+let _addKeysSourcePath = null;       // server-side path to the uploaded file
+let _addKeysSourceFormat = null;     // 'gp' or 'midi'
+// Cached after a successful list-tracks call; the keys-track radio value
+// is an index into this array, not the track's MIDI/GP index, because
+// format-0 channel splits can yield multiple picker entries sharing the
+// same MIDI `index`.
+let _addKeysSortedTracks = [];
+
+window.editorShowAddKeysModal = () => {
+    if (S.format !== 'sloppak') return;
+    document.getElementById('editor-add-keys-modal').classList.remove('hidden');
+    document.getElementById('editor-add-keys-tracks').classList.add('hidden');
+    document.getElementById('editor-add-keys-go').disabled = true;
+    document.getElementById('editor-add-keys-status').textContent = '';
+    const fi = document.getElementById('editor-add-keys-file');
+    if (fi) fi.value = '';
+    _addKeysSourcePath = null;
+    _addKeysSourceFormat = null;
+};
+
+window.editorHideAddKeysModal = () => {
+    document.getElementById('editor-add-keys-modal').classList.add('hidden');
+};
+
+window.editorKeysFileSelected = async (input) => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const statusEl = document.getElementById('editor-add-keys-status');
+    statusEl.textContent = 'Parsing ' + file.name + '...';
+
+    // Drop any state from a previous successful parse so a later parse
+    // failure (or empty-tracks result) can't be silently committed via
+    // editorDoAddKeys using the older file's path.
+    _addKeysSourcePath = null;
+    _addKeysSortedTracks = [];
+    document.getElementById('editor-add-keys-go').disabled = true;
+    document.getElementById('editor-add-keys-tracks').classList.add('hidden');
+
+    const lower = file.name.toLowerCase();
+    const isMidi = lower.endsWith('.mid') || lower.endsWith('.midi');
+    _addKeysSourceFormat = isMidi ? 'midi' : 'gp';
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    try {
+        const url = isMidi
+            ? '/api/plugins/editor/import-midi'
+            : '/api/plugins/editor/import-gp';
+        const resp = await fetch(url, { method: 'POST', body: fd });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            return;
+        }
+        const tracks = data.tracks || [];
+        // Surface piano-flagged tracks first; include all so the user can override.
+        const sorted = tracks.slice().sort((a, b) => {
+            const ap = (a.is_piano ? 0 : 1);
+            const bp = (b.is_piano ? 0 : 1);
+            if (ap !== bp) return ap - bp;
+            return (b.notes || 0) - (a.notes || 0);
+        });
+
+        if (sorted.length === 0) {
+            statusEl.textContent = 'No tracks found in this file.';
+            // Leave the cleared state from above in place — no usable
+            // tracks means editorDoAddKeys must remain disabled.
+            return;
+        }
+
+        // Only commit the new state once we know there's a usable track set.
+        _addKeysSourcePath = isMidi ? data.midi_path : data.gp_path;
+        // Stash so editorDoAddKeys can resolve the radio value back to the
+        // full track entry (it carries both `index` and `channel_filter`,
+        // which can collide if a format-0 file produced multiple entries
+        // sharing the same `index`).
+        _addKeysSortedTracks = sorted;
+
+        const listEl = document.getElementById('editor-add-keys-track-list');
+        const firstPianoPos = sorted.findIndex(t => t.is_piano);
+        const defaultPos = firstPianoPos >= 0 ? firstPianoPos : 0;
+        // Radio value is the position in `sorted` (not t.index) because
+        // format-0 channel splits produce multiple entries that share the
+        // same MIDI track_index — we need a unique key.
+        listEl.innerHTML = sorted.map((t, pos) => {
+            const checked = pos === defaultPos ? 'checked' : '';
+            const isDrums = !!(t.is_drums || t.is_percussion);
+            const flag = t.is_piano ? '<span class="text-indigo-300">[keys]</span>' : '';
+            const drumsTag = isDrums ? '<span class="text-red-400">[drums]</span>' : '';
+            const safeName = _editorEscHtml(t.name || '') || _editorEscHtml('Track ' + t.index);
+            return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
+                <input type="radio" name="keys-track" value="${pos}" ${checked} class="accent-indigo-500">
+                <span class="text-gray-200">${safeName}</span>
+                ${flag} ${drumsTag}
+                <span class="text-gray-600 ml-auto">${Number(t.notes) || 0} notes</span>
+            </label>`;
+        }).join('');
+        document.getElementById('editor-add-keys-tracks').classList.remove('hidden');
+        document.getElementById('editor-add-keys-go').disabled = false;
+        const found = sorted.filter(t => t.is_piano).length;
+        statusEl.textContent = found > 0
+            ? `Found ${found} keyboard track(s). Pick one.`
+            : `No tracks auto-flagged as keyboard — pick one manually.`;
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+    }
+};
+
+window.editorDoAddKeys = async () => {
+    if (!_addKeysSourcePath || !S.sessionId) return;
+    const statusEl = document.getElementById('editor-add-keys-status');
+    const goBtn = document.getElementById('editor-add-keys-go');
+    goBtn.disabled = true;
+    statusEl.textContent = 'Importing keys track...';
+
+    const radio = document.querySelector('input[name="keys-track"]:checked');
+    // Radio value is a position in _addKeysSortedTracks; resolve it back to
+    // the full entry so we can pull both `index` and `channel_filter`.
+    const pos = radio ? parseInt(radio.value) : 0;
+    const picked = _addKeysSortedTracks[pos] || _addKeysSortedTracks[0];
+    if (!picked) { statusEl.textContent = 'No track selected.'; goBtn.disabled = false; return; }
+    const trackIndex = Number(picked.index) || 0;
+    const channelFilter = (picked.channel_filter == null) ? null : Number(picked.channel_filter);
+
+    try {
+        const url = _addKeysSourceFormat === 'midi'
+            ? '/api/plugins/editor/import-keys-midi'
+            : '/api/plugins/editor/import-keys';
+        const audioOffset = _effectiveAudioOffset();
+        const body = _addKeysSourceFormat === 'midi'
+            ? { midi_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: audioOffset,
+                channel_filter: channelFilter }
+            : { gp_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: audioOffset };
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.textContent = 'Error: ' + data.error;
+            goBtn.disabled = false;
+            return;
+        }
+
+        // Register the new arrangement with the server-side session (no-op for sloppak).
+        const addResp = await fetch('/api/plugins/editor/add-arrangement', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: S.sessionId,
+                arrangement: data.arrangement,
+                xml_path: data.xml_path || '',
+            }),
+        });
+        const addData = await addResp.json().catch(() => ({}));
+        if (!addResp.ok || addData.error) {
+            statusEl.textContent = 'Error registering arrangement: ' + (addData.error || addResp.status);
+            goBtn.disabled = false;
+            return;
+        }
+
+        // Append in-memory and switch to it
+        S.arrangements.push(data.arrangement);
+        S.currentArr = S.arrangements.length - 1;
+        const sel = document.getElementById('editor-arrangement');
+        sel.value = S.currentArr;
+
+        flattenChords();
+        if (typeof updatePianoRange === 'function') updatePianoRange();
+        updateArrangementSelector();
+        updateStatus();
+        draw();
+
+        editorHideAddKeysModal();
+        setStatus('Added Keys arrangement (' + data.arrangement.notes.length + ' notes). Save to commit.');
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+        goBtn.disabled = false;
+    }
+};
 
 // Run init after DOM is ready
 if (document.getElementById('editor-canvas')) {
