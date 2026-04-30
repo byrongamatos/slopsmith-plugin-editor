@@ -132,7 +132,8 @@ function yToMidi(y) { return pianoRange.hi - Math.floor((y - WAVEFORM_H) / PIANO
 // without it so the viewport snaps cleanly to the new arrangement.
 function updatePianoRange(expandOnly = false) {
     const nn = notes();
-    let lo = 127, hi = 0;
+    // noteToMidi encodes up to string=5, fret=23 → max 143; match the drag-clamp ceiling.
+    let lo = 143, hi = 0;
     for (const n of nn) {
         const m = noteToMidi(n.string, n.fret);
         if (m < lo) lo = m;
@@ -147,9 +148,9 @@ function updatePianoRange(expandOnly = false) {
         PIANO_LANE_H = 4;
         return;
     }
-    // Expand to octave boundaries with padding
+    // Expand to octave boundaries with padding; ceiling matches drag-clamp max of 143.
     let nlo = Math.max(0, Math.floor(lo / 12) * 12 - 6);
-    let nhi = Math.min(127, Math.ceil((hi + 1) / 12) * 12 + 5);
+    let nhi = Math.min(143, Math.ceil((hi + 1) / 12) * 12 + 5);
     if (expandOnly && pianoRange && !pianoRange._fromEmpty) {
         nlo = Math.min(nlo, pianoRange.lo);
         nhi = Math.max(nhi, pianoRange.hi);
@@ -2746,10 +2747,13 @@ window.editorDoAddKeys = async () => {
 };
 
 function _uniqueKeysName() {
-    const taken = new Set(S.arrangements.map(a => (a.name || '').toLowerCase()));
+    const taken = new Set(S.arrangements.map(a => (a.name || '').trim().toLowerCase()));
     if (!taken.has('keys')) return 'Keys';
-    for (let i = 2; i < 100; i++) if (!taken.has(`keys ${i}`)) return `Keys ${i}`;
-    return 'Keys';
+    // The taken set has a finite number of entries, so a free slot is guaranteed
+    // within taken.size + 1 iterations; the +2 ceiling is a safety margin.
+    const limit = taken.size + 2;
+    for (let i = 2; i <= limit; i++) if (!taken.has(`keys ${i}`)) return `Keys ${i}`;
+    return `Keys ${Date.now()}`;
 }
 
 let _addingEmptyKeys = false;
