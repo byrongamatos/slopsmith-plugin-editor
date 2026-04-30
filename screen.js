@@ -1455,6 +1455,15 @@ function updateArrangementSelector() {
         sel.appendChild(opt);
     });
     sel.style.display = S.arrangements.length > 1 ? '' : 'none';
+    // Re-apply the active arrangement after the rebuild so callers that
+    // changed S.currentArr (e.g. + Keys / + Drums append, remove-arr)
+    // don't end up with a `<select>` snapped back to option 0 while the
+    // canvas edits the appended arrangement. Clamp to the valid range
+    // so an out-of-bounds S.currentArr doesn't render as a blank value.
+    if (S.arrangements.length > 0) {
+        const idx = Math.max(0, Math.min(S.currentArr || 0, S.arrangements.length - 1));
+        sel.value = String(idx);
+    }
 
     // Show "+ Drums" button when a session is active and no drums arrangement exists
     const hasDrums = S.arrangements.some(a => /^drums/i.test(a.name || ''));
@@ -2358,6 +2367,14 @@ window.editorDrumsGPSelected = async (input) => {
     const statusEl = document.getElementById('editor-add-drums-status');
     statusEl.textContent = 'Parsing GP file...';
 
+    // Drop any state from a previous successful parse so a later parse
+    // failure (or empty-tracks result) can't be silently committed via
+    // editorDoAddDrums using the older file's path.
+    _addDrumsGpPath = null;
+    _addDrumsTracks = [];
+    document.getElementById('editor-add-drums-go').disabled = true;
+    document.getElementById('editor-add-drums-tracks').classList.add('hidden');
+
     const formData = new FormData();
     formData.append('file', file);
 
@@ -2372,18 +2389,20 @@ window.editorDrumsGPSelected = async (input) => {
             return;
         }
 
-        _addDrumsGpPath = data.gp_path;
-        _addDrumsTracks = data.tracks;
-
         // Show only drum/percussion tracks (accept legacy is_percussion alias
         // from older slopsmith server.py revisions).
-        const drumTracks = data.tracks.filter(t => (t.is_drums || t.is_percussion) && t.notes > 0);
+        const tracks = data.tracks || [];
+        const drumTracks = tracks.filter(t => (t.is_drums || t.is_percussion) && t.notes > 0);
         if (drumTracks.length === 0) {
             statusEl.textContent = 'No drum/percussion tracks found in this file.';
-            document.getElementById('editor-add-drums-tracks').classList.add('hidden');
-            document.getElementById('editor-add-drums-go').disabled = true;
+            // Leave the cleared state from above in place — no usable
+            // tracks means editorDoAddDrums must remain disabled.
             return;
         }
+
+        // Only commit the new state once we know there's a usable track set.
+        _addDrumsGpPath = data.gp_path;
+        _addDrumsTracks = tracks;
 
         const listEl = document.getElementById('editor-add-drums-track-list');
         listEl.innerHTML = drumTracks.map(t => {
@@ -2502,6 +2521,14 @@ window.editorKeysFileSelected = async (input) => {
     const statusEl = document.getElementById('editor-add-keys-status');
     statusEl.textContent = 'Parsing ' + file.name + '...';
 
+    // Drop any state from a previous successful parse so a later parse
+    // failure (or empty-tracks result) can't be silently committed via
+    // editorDoAddKeys using the older file's path.
+    _addKeysSourcePath = null;
+    _addKeysSortedTracks = [];
+    document.getElementById('editor-add-keys-go').disabled = true;
+    document.getElementById('editor-add-keys-tracks').classList.add('hidden');
+
     const lower = file.name.toLowerCase();
     const isMidi = lower.endsWith('.mid') || lower.endsWith('.midi');
     _addKeysSourceFormat = isMidi ? 'midi' : 'gp';
@@ -2519,7 +2546,6 @@ window.editorKeysFileSelected = async (input) => {
             statusEl.textContent = 'Error: ' + data.error;
             return;
         }
-        _addKeysSourcePath = isMidi ? data.midi_path : data.gp_path;
         const tracks = data.tracks || [];
         // Surface piano-flagged tracks first; include all so the user can override.
         const sorted = tracks.slice().sort((a, b) => {
@@ -2528,17 +2554,21 @@ window.editorKeysFileSelected = async (input) => {
             if (ap !== bp) return ap - bp;
             return (b.notes || 0) - (a.notes || 0);
         });
+
+        if (sorted.length === 0) {
+            statusEl.textContent = 'No tracks found in this file.';
+            // Leave the cleared state from above in place — no usable
+            // tracks means editorDoAddKeys must remain disabled.
+            return;
+        }
+
+        // Only commit the new state once we know there's a usable track set.
+        _addKeysSourcePath = isMidi ? data.midi_path : data.gp_path;
         // Stash so editorDoAddKeys can resolve the radio value back to the
         // full track entry (it carries both `index` and `channel_filter`,
         // which can collide if a format-0 file produced multiple entries
         // sharing the same `index`).
         _addKeysSortedTracks = sorted;
-
-        if (sorted.length === 0) {
-            statusEl.textContent = 'No tracks found in this file.';
-            document.getElementById('editor-add-keys-tracks').classList.add('hidden');
-            return;
-        }
 
         const listEl = document.getElementById('editor-add-keys-track-list');
         const firstPianoPos = sorted.findIndex(t => t.is_piano);
