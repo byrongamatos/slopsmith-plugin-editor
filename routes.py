@@ -497,9 +497,9 @@ def setup(app, context):
                     raw_id = ad.get("id") or ""
                     if raw_id and raw_id not in used_ids:
                         aid = raw_id
-                        used_ids.add(aid)
                     else:
                         aid = _arrangement_id(ad.get("name", "arr"), used_ids)
+                    used_ids.add(aid)
                     wire = _build_wire(ad, i == 0)
                     merged_arrangements.append({
                         "entry": {
