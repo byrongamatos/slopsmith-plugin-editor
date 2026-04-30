@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -714,13 +715,12 @@ def setup(app, context):
         # Opportunistic TTL cleanup: remove any slopsmith_midi_* sandbox dirs
         # older than 30 minutes so unclaimed uploads (cancelled modals, etc.)
         # don't accumulate indefinitely on the server.
-        import time as _time
         _ttl_secs = 30 * 60
-        _tmp_root = Path(tempfile.gettempdir())
-        for _stale in _tmp_root.glob("slopsmith_midi_*"):
+        tmp_root = Path(tempfile.gettempdir())
+        for _stale in tmp_root.glob("slopsmith_midi_*"):
             try:
                 if _stale.is_dir():
-                    age = _time.time() - _stale.stat().st_mtime
+                    age = time.time() - _stale.stat().st_mtime
                     if age > _ttl_secs:
                         shutil.rmtree(_stale, ignore_errors=True)
             except OSError:
