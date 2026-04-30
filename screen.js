@@ -1423,8 +1423,7 @@ async function loadCDLC(filename) {
 
         // Reset offset UI so _effectiveAudioOffset() doesn't carry over a
         // delta from a previous session's sync nudge into this one.
-        const _offsetEl = document.getElementById('editor-offset');
-        if (_offsetEl) { _offsetEl.value = '0'; _offsetEl.dataset.applied = '0'; }
+        _resetOffsetUI();
 
         // Flatten chord notes into main notes array for unified editing
         flattenChords();
@@ -1528,6 +1527,13 @@ function _editorEscHtml(s) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+// Reset the offset input and its applied-delta dataset, called when loading
+// any session so _effectiveAudioOffset() doesn't carry over a previous nudge.
+function _resetOffsetUI() {
+    const el = document.getElementById('editor-offset');
+    if (el) { el.value = '0'; el.dataset.applied = '0'; }
 }
 
 function _normalizeSongList(raw) {
@@ -2200,8 +2206,7 @@ window.editorDoCreate = async () => {
 
         // Reset offset UI so _effectiveAudioOffset() doesn't carry over a
         // delta from a previous session's sync nudge.
-        const _offsetElC = document.getElementById('editor-offset');
-        if (_offsetElC) { _offsetElC.value = '0'; _offsetElC.dataset.applied = '0'; }
+        _resetOffsetUI();
 
         flattenChords();
         if (isKeysMode()) updatePianoRange();
