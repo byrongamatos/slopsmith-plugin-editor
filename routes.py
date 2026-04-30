@@ -111,7 +111,9 @@ def setup(app, context):
                 if rel not in seen:
                     seen.add(rel)
                     files.append({"filename": rel, "format": fmt})
-            # Also check sub-dirs with a .sloppak suffix (authoring form).
+            # Collect authoring-form .sloppak/ dirs and prune them from
+            # dirnames so os.walk won't descend into their contents.
+            to_prune = []
             for name in dirnames:
                 ext = os.path.splitext(name)[1].lower()
                 if ext == ".sloppak":
@@ -120,6 +122,9 @@ def setup(app, context):
                     if rel not in seen:
                         seen.add(rel)
                         files.append({"filename": rel, "format": "sloppak"})
+                    to_prune.append(name)
+            for name in to_prune:
+                dirnames.remove(name)
         files.sort(key=lambda x: x["filename"])
         return files
 
@@ -142,12 +147,12 @@ def setup(app, context):
             filepath.relative_to(dlc_dir.resolve())
         except ValueError:
             return JSONResponse({"error": "Invalid filename"}, 400)
-        if filepath.suffix not in (".psarc", ".sloppak"):
+        if filepath.suffix.lower() not in (".psarc", ".sloppak"):
             return JSONResponse({"error": "Unsupported file type"}, 400)
         if not filepath.exists():
             return JSONResponse({"error": "File not found"}, 404)
 
-        is_sloppak = filepath.suffix == ".sloppak"
+        is_sloppak = filepath.suffix.lower() == ".sloppak"
 
         def _load_psarc():
             tmp_dir = tempfile.mkdtemp(prefix="slopsmith_editor_")
