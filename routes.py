@@ -31,7 +31,17 @@ def setup(app, context):
     from lib import sloppak as sloppak_mod
 
     STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
-    SLOPPAK_CACHE = STATIC_DIR / "sloppak_cache"
+    # The unpack cache must NOT live under STATIC_DIR — that directory is
+    # mounted as the public /static web root, so anything under it is
+    # downloadable by URL. Stems / manifests / covers of every loaded
+    # sloppak would leak. Use the shared private cache the server exposes
+    # via the plugin context (lives under CONFIG_DIR), with a fall-back
+    # for any older harness that doesn't surface the helper.
+    _get_sloppak_cache = context.get("get_sloppak_cache_dir")
+    if callable(_get_sloppak_cache):
+        SLOPPAK_CACHE = Path(_get_sloppak_cache())
+    else:
+        SLOPPAK_CACHE = config_dir / "sloppak_cache"
 
     # Active editing sessions: session_id -> {dir, audio_file, filename, song_data}
     sessions = {}
@@ -138,7 +148,12 @@ def setup(app, context):
                         wem_files[0], os.path.join(tmp_dir, "audio")
                     )
                     audio_file = audio_path
-                    audio_id = Path(filename).stem.replace(" ", "_")
+                    # Sanitise the full relative path (not just .stem) so
+                    # nested `foo/bar.psarc` and `baz/bar.psarc` don't
+                    # overwrite each other's editor_audio_*.* file under
+                    # STATIC_DIR. Matches the sloppak path's id scheme
+                    # and the session_id sanitisation.
+                    audio_id = filename.replace("/", "__").replace("\\", "__").replace(" ", "_")
                     ext = Path(audio_path).suffix
                     dest = STATIC_DIR / f"editor_audio_{audio_id}{ext}"
                     shutil.copy2(audio_path, dest)
@@ -191,7 +206,12 @@ def setup(app, context):
             if stem_path is None and loaded.stems:
                 stem_path = loaded.source_dir / loaded.stems[0].get("file", "")
             if stem_path and stem_path.exists():
-                audio_id = Path(filename).stem.replace(" ", "_").replace("/", "_")
+                # Same basename-collision class as session_id: nested paths
+                # like `foo/bar.psarc` and `baz/bar.sloppak` both reduce
+                # to stem "bar". Use a sanitised full path so two browser
+                # tabs loading distinct songs don't overwrite each other's
+                # `editor_audio_*` file under STATIC_DIR.
+                audio_id = filename.replace("/", "__").replace("\\", "__").replace(" ", "_")
                 ext = stem_path.suffix
                 dest = STATIC_DIR / f"editor_audio_{audio_id}{ext}"
                 shutil.copy2(stem_path, dest)
