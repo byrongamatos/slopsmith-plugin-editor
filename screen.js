@@ -1573,8 +1573,28 @@ async function saveCDLC() {
     if (!S.sessionId) return;
     setStatus('Saving...');
 
-    // Reconstruct chords from notes at the same time position
-    reconstructChords();
+    // Sloppak save sends the full S.arrangements snapshot, so every
+    // arrangement (not just the active one) needs its chords reconstructed.
+    // Tab-switching only flattens the new currentArr — non-current
+    // arrangements may be in any of three states: never flattened
+    // (chords:[chord_groups], notes:[regular notes only]), flattened-and-
+    // -unreconstructed (chords:[], notes:[regular + flattened chord notes
+    // tagged with _fromChord]), or already round-tripped through both.
+    // Running flatten→reconstruct on every arrangement normalises them all:
+    // flatten is a no-op on already-flattened ones, and reconstruct rebuilds
+    // the chord groups by time. PSARC saves only emit S.currentArr so they
+    // keep the existing single-pass call.
+    const savedArr = S.currentArr;
+    if (S.format === 'sloppak') {
+        for (let i = 0; i < S.arrangements.length; i++) {
+            S.currentArr = i;
+            flattenChords();
+            reconstructChords();
+        }
+        S.currentArr = savedArr;
+    } else {
+        reconstructChords();
+    }
 
     const arr = S.arrangements[S.currentArr];
     const body = {
@@ -2454,6 +2474,11 @@ window.editorDoAddDrums = async () => {
 
 let _addKeysSourcePath = null;       // server-side path to the uploaded file
 let _addKeysSourceFormat = null;     // 'gp' or 'midi'
+// Cached after a successful list-tracks call; the keys-track radio value
+// is an index into this array, not the track's MIDI/GP index, because
+// format-0 channel splits can yield multiple picker entries sharing the
+// same MIDI `index`.
+let _addKeysSortedTracks = [];
 
 window.editorShowAddKeysModal = () => {
     if (S.format !== 'sloppak') return;
@@ -2503,6 +2528,11 @@ window.editorKeysFileSelected = async (input) => {
             if (ap !== bp) return ap - bp;
             return (b.notes || 0) - (a.notes || 0);
         });
+        // Stash so editorDoAddKeys can resolve the radio value back to the
+        // full track entry (it carries both `index` and `channel_filter`,
+        // which can collide if a format-0 file produced multiple entries
+        // sharing the same `index`).
+        _addKeysSortedTracks = sorted;
 
         if (sorted.length === 0) {
             statusEl.textContent = 'No tracks found in this file.';
@@ -2511,16 +2541,19 @@ window.editorKeysFileSelected = async (input) => {
         }
 
         const listEl = document.getElementById('editor-add-keys-track-list');
-        const firstPianoIdx = sorted.findIndex(t => t.is_piano);
-        const defaultIdx = firstPianoIdx >= 0 ? sorted[firstPianoIdx].index : sorted[0].index;
-        listEl.innerHTML = sorted.map(t => {
-            const checked = t.index === defaultIdx ? 'checked' : '';
+        const firstPianoPos = sorted.findIndex(t => t.is_piano);
+        const defaultPos = firstPianoPos >= 0 ? firstPianoPos : 0;
+        // Radio value is the position in `sorted` (not t.index) because
+        // format-0 channel splits produce multiple entries that share the
+        // same MIDI track_index — we need a unique key.
+        listEl.innerHTML = sorted.map((t, pos) => {
+            const checked = pos === defaultPos ? 'checked' : '';
             const isDrums = !!(t.is_drums || t.is_percussion);
             const flag = t.is_piano ? '<span class="text-indigo-300">[keys]</span>' : '';
             const drumsTag = isDrums ? '<span class="text-red-400">[drums]</span>' : '';
             const safeName = _editorEscHtml(t.name || '') || ('Track ' + t.index);
             return `<label class="flex items-center gap-2 text-xs text-gray-300 py-0.5">
-                <input type="radio" name="keys-track" value="${t.index}" ${checked} class="accent-indigo-500">
+                <input type="radio" name="keys-track" value="${pos}" ${checked} class="accent-indigo-500">
                 <span class="text-gray-200">${safeName}</span>
                 ${flag} ${drumsTag}
                 <span class="text-gray-600 ml-auto">${Number(t.notes) || 0} notes</span>
@@ -2545,14 +2578,21 @@ window.editorDoAddKeys = async () => {
     statusEl.textContent = 'Importing keys track...';
 
     const radio = document.querySelector('input[name="keys-track"]:checked');
-    const trackIndex = radio ? parseInt(radio.value) : 0;
+    // Radio value is a position in _addKeysSortedTracks; resolve it back to
+    // the full entry so we can pull both `index` and `channel_filter`.
+    const pos = radio ? parseInt(radio.value) : 0;
+    const picked = _addKeysSortedTracks[pos] || _addKeysSortedTracks[0];
+    if (!picked) { statusEl.textContent = 'No track selected.'; goBtn.disabled = false; return; }
+    const trackIndex = Number(picked.index) || 0;
+    const channelFilter = (picked.channel_filter == null) ? null : Number(picked.channel_filter);
 
     try {
         const url = _addKeysSourceFormat === 'midi'
             ? '/api/plugins/editor/import-keys-midi'
             : '/api/plugins/editor/import-keys';
         const body = _addKeysSourceFormat === 'midi'
-            ? { midi_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: S.offset || 0 }
+            ? { midi_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: S.offset || 0,
+                channel_filter: channelFilter }
             : { gp_path: _addKeysSourcePath, track_index: trackIndex, audio_offset: S.offset || 0 };
         const resp = await fetch(url, {
             method: 'POST',

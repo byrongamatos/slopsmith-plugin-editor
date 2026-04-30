@@ -83,12 +83,13 @@ def setup(app, context):
             return []
         files = []
         for f in dlc_dir.rglob("*"):
-            if not f.is_file():
-                continue
-            if f.suffix == ".psarc":
-                files.append({"filename": str(f.relative_to(dlc_dir)), "format": "psarc"})
-            elif f.suffix == ".sloppak":
+            # Sloppak has two valid forms: zip (`.sloppak` file) and
+            # authoring directory (`.sloppak/`). load_cdlc + _save_sloppak
+            # already handle both forms; the picker has to surface both too.
+            if f.suffix == ".sloppak":
                 files.append({"filename": str(f.relative_to(dlc_dir)), "format": "sloppak"})
+            elif f.is_file() and f.suffix == ".psarc":
+                files.append({"filename": str(f.relative_to(dlc_dir)), "format": "psarc"})
         files.sort(key=lambda x: x["filename"])
         return files
 
@@ -641,6 +642,17 @@ def setup(app, context):
         midi_path_raw = data.get("midi_path", "")
         track_index = data.get("track_index")
         audio_offset = float(data.get("audio_offset", 0.0))
+        # Optional: when the picker entry came from a format-0 channel
+        # split, this isolates the chosen channel out of the merged track.
+        channel_filter_raw = data.get("channel_filter")
+        channel_filter: int | None
+        if channel_filter_raw is None or channel_filter_raw == "":
+            channel_filter = None
+        else:
+            try:
+                channel_filter = int(channel_filter_raw)
+            except (TypeError, ValueError):
+                channel_filter = None
 
         validated = _validate_editor_upload_path(midi_path_raw, "slopsmith_midi_")
         if not validated:
@@ -651,7 +663,8 @@ def setup(app, context):
 
         def _convert():
             wire = convert_midi_track_to_keys_wire(
-                midi_path, int(track_index), audio_offset, "Keys"
+                midi_path, int(track_index), audio_offset, "Keys",
+                channel_filter=channel_filter,
             )
             # Convert wire → editor's long-named shape so the frontend can
             # consume it identically to import-keys output.
