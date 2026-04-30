@@ -1524,13 +1524,10 @@ function updateArrangementSelector() {
         drumsBtn.classList.toggle('hidden', !S.sessionId || hasDrums);
     }
 
-    // Show "+ Keys" button on sloppak sessions when no keys arrangement exists yet.
-    // Use the same predicate as isKeysMode() so the set of names treated as
-    // existing keys charts is exactly the set that opens in keys editor mode.
-    const hasKeys = S.arrangements.some(a => KEYS_PATTERN.test(a.name || ''));
+    // Show "+ Keys" button on sloppak sessions; multiple Keys arrangements are allowed.
     const keysBtn = document.getElementById('editor-add-keys-btn');
     if (keysBtn) {
-        keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak' || hasKeys);
+        keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak');
     }
 
     // Show remove button when there are multiple arrangements
