@@ -282,6 +282,11 @@
                 class="w-full px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed" disabled>
                 Import Keys Track
             </button>
+            <div class="text-center text-xs text-gray-600">— or —</div>
+            <button onclick="editorAddEmptyKeys()"
+                class="w-full px-4 py-2 bg-dark-600 hover:bg-dark-500 rounded-lg text-sm font-medium">
+                Start Empty (no source file)
+            </button>
             <div id="editor-add-keys-status" class="text-xs text-gray-500"></div>
         </div>
     </div>
@@ -291,10 +296,14 @@
 <div id="editor-add-note-dialog" class="hidden absolute z-50 bg-dark-700 border border-gray-700 rounded-lg shadow-xl p-3 w-48">
     <div class="text-xs text-gray-400 mb-2">Add Note</div>
     <div class="flex gap-2 mb-2">
-        <div class="flex-1">
+        <div id="editor-add-fret-col" class="flex-1">
             <label class="text-xs text-gray-500">Fret</label>
             <input id="editor-add-fret" type="number" min="0" max="24" value="0"
                 class="w-full bg-dark-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 outline-none">
+        </div>
+        <div id="editor-add-pitch-col" class="flex-1 hidden">
+            <label class="text-xs text-gray-500">Pitch</label>
+            <div id="editor-add-pitch-label" class="px-2 py-1 text-sm text-indigo-300 font-medium">C4</div>
         </div>
         <div class="flex-1">
             <label class="text-xs text-gray-500">Sustain</label>

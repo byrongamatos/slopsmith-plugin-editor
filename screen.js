@@ -36,11 +36,9 @@ const PIANO_OCTAVE_COLORS = [
 ];
 let PIANO_LANE_H = 10;  // pixels per MIDI semitone
 let pianoRange = { lo: 36, hi: 96 }; // MIDI range, updated per arrangement
-// Names that should open in keys (piano-roll) editor mode. Keep this in
-// sync with the `+ Keys` button visibility test below — a name that's
-// considered "already a keys arrangement" must also open in keys mode,
-// otherwise sloppaks authored as "Piano"/"Keyboard"/"Synth" would render
-// as 6-string charts while the add-keys button is hidden.
+// Names that should open in keys (piano-roll) editor mode. Arrangements
+// named "Piano", "Keyboard", or "Synth" render as piano-roll charts rather
+// than 6-string guitar charts.
 const KEYS_PATTERN = /^(keys|piano|keyboard|synth)/i;
 
 // ════════════════════════════════════════════════════════════════════
@@ -124,23 +122,45 @@ function midiToFret(midi) { return midi % 24; }
 
 // Piano roll Y: higher MIDI = higher on screen (lower Y)
 function midiToY(midi) { return WAVEFORM_H + (pianoRange.hi - midi) * PIANO_LANE_H; }
-function yToMidi(y) { return pianoRange.hi - Math.floor((y - WAVEFORM_H) / PIANO_LANE_H); }
+function yToMidi(y) {
+    const m = pianoRange.hi - Math.floor((y - WAVEFORM_H) / PIANO_LANE_H);
+    return Math.max(pianoRange.lo, Math.min(pianoRange.hi, m));
+}
 
-function updatePianoRange() {
+// expandOnly=true preserves any wider current range (used during in-place
+// edits so adding a low note doesn't collapse the viewport and lose
+// previously-clickable upper lanes). Load/import/arrangement-switch call
+// without it so the viewport snaps cleanly to the new arrangement.
+function updatePianoRange(expandOnly = false) {
     const nn = notes();
-    let lo = 127, hi = 0;
+    // noteToMidi encodes up to string=5, fret=23 → max 143; match the drag-clamp ceiling.
+    let lo = 143, hi = 0;
     for (const n of nn) {
         const m = noteToMidi(n.string, n.fret);
         if (m < lo) lo = m;
         if (m > hi) hi = m;
     }
-    if (lo > hi) { lo = 48; hi = 84; }
-    // Expand to octave boundaries with padding
-    lo = Math.max(0, Math.floor(lo / 12) * 12 - 6);
-    hi = Math.min(127, Math.ceil((hi + 1) / 12) * 12 + 5);
-    pianoRange = { lo, hi };
-    // Adjust lane height to fill available space nicely
-    PIANO_LANE_H = Math.max(6, Math.min(14, 350 / (hi - lo + 1)));
+    if (lo > hi) {
+        // Empty arrangement: expose the full 88-key range so any starting
+        // pitch is clickable. Lanes are deliberately thin (~4px) to keep the
+        // viewport within ~352px — once a note is added the range snaps to
+        // the actual note range and lanes return to normal height.
+        pianoRange = { lo: 21, hi: 108, _fromEmpty: true };
+        PIANO_LANE_H = 4;
+        return;
+    }
+    // Expand to octave boundaries with padding; ceiling matches drag-clamp max of 143.
+    let nlo = Math.max(0, Math.floor(lo / 12) * 12 - 6);
+    let nhi = Math.min(143, Math.ceil((hi + 1) / 12) * 12 + 5);
+    if (expandOnly && pianoRange && !pianoRange._fromEmpty) {
+        nlo = Math.min(nlo, pianoRange.lo);
+        nhi = Math.max(nhi, pianoRange.hi);
+    }
+    pianoRange = { lo: nlo, hi: nhi };
+    // Adjust lane height to fill available space nicely. Allow down to 4px
+    // so wide note ranges (many octaves) remain visible without overflowing
+    // the canvas wrapper.
+    PIANO_LANE_H = Math.max(4, Math.min(14, 350 / (nhi - nlo + 1)));
 }
 
 function snapTime(t) {
@@ -631,9 +651,16 @@ function hitNoteEdge(mx, my) {
 
 class EditHistory {
     constructor() { this.undo = []; this.redo = []; }
-    exec(cmd) { cmd.exec(); this.undo.push(cmd); this.redo = []; this._ui(); }
-    doUndo() { if (!this.undo.length) return; const c = this.undo.pop(); c.rollback(); this.redo.push(c); this._ui(); draw(); }
-    doRedo() { if (!this.redo.length) return; const c = this.redo.pop(); c.exec(); this.undo.push(c); this._ui(); draw(); }
+    exec(cmd) { cmd.exec(); this.undo.push(cmd); this.redo = []; this._afterEdit(); this._ui(); }
+    doUndo() { if (!this.undo.length) return; const c = this.undo.pop(); c.rollback(); this.redo.push(c); this._afterEdit(); this._ui(); draw(); }
+    doRedo() { if (!this.redo.length) return; const c = this.redo.pop(); c.exec(); this.undo.push(c); this._afterEdit(); this._ui(); draw(); }
+    _afterEdit() {
+        // Keep the keys viewport in sync with the current note range so
+        // multi-octave authoring works without manual range control.
+        // expandOnly=true so adding a note outside the current viewport
+        // extends it instead of collapsing to the latest note's octave.
+        if (typeof isKeysMode === 'function' && isKeysMode()) updatePianoRange(true);
+    }
     _ui() {
         const u = document.getElementById('editor-undo');
         const r = document.getElementById('editor-redo');
@@ -1244,15 +1271,28 @@ function promptSlide(idx) {
 let addNoteData = null;
 
 function showAddNote(cx, cy, time, string, fret) {
-    addNoteData = { time, string };
+    const isKeys = isKeysMode();
+    addNoteData = { time, string, fret, isKeys };
     const dlg = document.getElementById('editor-add-note-dialog');
     dlg.style.left = cx + 'px';
     dlg.style.top = cy + 'px';
     dlg.classList.remove('hidden');
-    const inp = document.getElementById('editor-add-fret');
-    inp.value = fret != null ? String(fret) : '0';
-    inp.focus();
-    inp.select();
+
+    document.getElementById('editor-add-fret-col').classList.toggle('hidden', isKeys);
+    document.getElementById('editor-add-pitch-col').classList.toggle('hidden', !isKeys);
+
+    if (isKeys) {
+        const midi = noteToMidi(string, fret);
+        document.getElementById('editor-add-pitch-label').textContent = midiToNote(midi);
+        const sus = document.getElementById('editor-add-sustain');
+        sus.focus();
+        sus.select();
+    } else {
+        const inp = document.getElementById('editor-add-fret');
+        inp.value = fret != null ? String(fret) : '0';
+        inp.focus();
+        inp.select();
+    }
 }
 
 function hideAddNote() {
@@ -1262,7 +1302,9 @@ function hideAddNote() {
 
 window.editorConfirmAddNote = function() {
     if (!addNoteData) return;
-    const fret = Math.max(0, Math.min(24, parseInt(document.getElementById('editor-add-fret').value) || 0));
+    const fret = addNoteData.isKeys
+        ? addNoteData.fret
+        : Math.max(0, Math.min(24, parseInt(document.getElementById('editor-add-fret').value) || 0));
     const sustain = Math.max(0, parseFloat(document.getElementById('editor-add-sustain').value) || 0);
     const note = {
         time: addNoteData.time,
@@ -1486,13 +1528,10 @@ function updateArrangementSelector() {
         drumsBtn.classList.toggle('hidden', !S.sessionId || hasDrums);
     }
 
-    // Show "+ Keys" button on sloppak sessions when no keys arrangement exists yet.
-    // Use the same predicate as isKeysMode() so the set of names treated as
-    // existing keys charts is exactly the set that opens in keys editor mode.
-    const hasKeys = S.arrangements.some(a => KEYS_PATTERN.test(a.name || ''));
+    // Show "+ Keys" button on sloppak sessions; multiple Keys arrangements are allowed.
     const keysBtn = document.getElementById('editor-add-keys-btn');
     if (keysBtn) {
-        keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak' || hasKeys);
+        keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak');
     }
 
     // Show remove button when there are multiple arrangements
@@ -2707,6 +2746,63 @@ window.editorDoAddKeys = async () => {
     } catch (e) {
         statusEl.textContent = 'Failed: ' + e.message;
         goBtn.disabled = false;
+    }
+};
+
+function _uniqueKeysName() {
+    const taken = new Set(S.arrangements.map(a => (a.name || '').trim().toLowerCase()));
+    if (!taken.has('keys')) return 'Keys';
+    // The taken set has a finite number of entries, so a free slot is guaranteed
+    // within taken.size + 1 iterations; the +2 ceiling is a safety margin.
+    const limit = taken.size + 2;
+    for (let i = 2; i <= limit; i++) if (!taken.has(`keys ${i}`)) return `Keys ${i}`;
+    return `Keys ${Date.now()}`;
+}
+
+let _addingEmptyKeys = false;
+
+window.editorAddEmptyKeys = async () => {
+    if (S.format !== 'sloppak' || !S.sessionId) return;
+    if (_addingEmptyKeys) return;
+    _addingEmptyKeys = true;
+    const statusEl = document.getElementById('editor-add-keys-status');
+    const arrangement = {
+        name: _uniqueKeysName(),
+        tuning: [0, 0, 0, 0, 0, 0],
+        capo: 0,
+        notes: [],
+        chords: [],
+        chord_templates: [],
+    };
+    try {
+        const resp = await fetch('/api/plugins/editor/add-arrangement', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: S.sessionId, arrangement }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || data.error) {
+            statusEl.textContent = 'Error registering arrangement: ' + (data.error || resp.status);
+            return;
+        }
+
+        S.arrangements.push(arrangement);
+        S.currentArr = S.arrangements.length - 1;
+        const sel = document.getElementById('editor-arrangement');
+        if (sel) sel.value = S.currentArr;
+
+        flattenChords();
+        if (typeof updatePianoRange === 'function') updatePianoRange();
+        updateArrangementSelector();
+        updateStatus();
+        draw();
+
+        editorHideAddKeysModal();
+        setStatus('Added empty Keys arrangement. Double-click the chart to add notes; save to commit.');
+    } catch (e) {
+        statusEl.textContent = 'Failed: ' + e.message;
+    } finally {
+        _addingEmptyKeys = false;
     }
 };
 
