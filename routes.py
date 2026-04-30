@@ -96,7 +96,7 @@ def setup(app, context):
         seen: set = set()
         # Single os.walk pass so large libraries are traversed only once.
         # Sloppak has two valid forms: zip (`.sloppak` file) and authoring
-        # directory (`.sloppak/`).  All suffixes are lowercased so that
+        # directory (`.sloppak/`). All suffixes are lowercased so that
         # e.g. `.PSARC` / `.SLOPPAK` from older backends are handled correctly.
         _FORMATS = {".sloppak": "sloppak", ".psarc": "psarc"}
         for dirpath, dirnames, filenames in os.walk(dlc_dir):
