@@ -3170,7 +3170,7 @@ window.editorStopRecordMidi = () => {
     // starts from 0, not from a stale end-of-song position.
     if (S.duration && stopTime >= S.duration) {
         S.cursorTime = 0;
-        if (typeof updateTimeDisplay === 'function') updateTimeDisplay();
+        updateTimeDisplay();
     }
 
     // Cap any still-held notes (key never released).
