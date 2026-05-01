@@ -2414,6 +2414,10 @@ function init() {
 // ════════════════════════════════════════════════════════════════════
 
 window.editorRemoveArrangement = async () => {
+    if (_recState !== 'idle') {
+        setStatus('Cannot remove an arrangement while recording. Stop the take first.');
+        return;
+    }
     if (S.arrangements.length <= 1) return;
     const removeIdx = S.currentArr;
     const arr = S.arrangements[removeIdx];
@@ -2856,6 +2860,8 @@ const _recSustainOn = new Set();           // channels with CC64 pedal currently
 let _recNotes = [];                        // finalized {time,string,fret,sustain,techniques}
 let _recArrIdx = -1;                       // index of the in-progress Keys arrangement
 let ghostNotes = null;                     // alias of _recNotes while recording (for drawGhostNotes)
+let _recCountEl = null;                    // cached count DOM element (set at record-start)
+let _recCountLastMs = 0;                   // last timestamp _recCount updated the DOM
 
 function chartTimeNow() {
     // editorStartRecordMidi guards against !S.audioCtx, so this only runs
@@ -2983,8 +2989,10 @@ function _recFinalizeNote(pitch, onTime, offTime) {
 }
 
 function _recCount() {
-    const el = document.getElementById('editor-record-midi-count');
-    if (el) el.textContent = _recNotes.length + ' notes';
+    const now = performance.now();
+    if (now - _recCountLastMs < 80) return;   // throttle: at most once per ~80 ms
+    _recCountLastMs = now;
+    if (_recCountEl) _recCountEl.textContent = _recNotes.length + ' notes';
 }
 
 window.editorShowRecordMidiModal = async () => {
@@ -3096,6 +3104,8 @@ window.editorStartRecordMidi = () => {
     _recPending.clear();
     _recSustainOn.clear();
     _recNotes = [];
+    _recCountEl = document.getElementById('editor-record-midi-count');
+    _recCountLastMs = 0;  // reset throttle so the initial "0 notes" shows immediately
     _recCount();
     _recChannel = parseInt(chanSel.value);
     if (Number.isNaN(_recChannel)) _recChannel = -1;
@@ -3170,6 +3180,10 @@ window.editorStopRecordMidi = () => {
     _recNotes.sort((a, b) => a.time - b.time);
     const arr = S.arrangements[_recArrIdx];
     if (arr) arr.notes = _recNotes;
+
+    // Flush the final note count to the modal before hiding it.
+    _recCountLastMs = 0;
+    _recCount();
 
     // Restore focus to the recorded arrangement (user may have switched the
     // selector via keyboard / OS events that bypass the disabled flag) and
