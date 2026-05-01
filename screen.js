@@ -1408,6 +1408,8 @@ function playbackTick() {
             stopPlayback();
         }
         S.cursorTime = 0;
+        updateTimeDisplay(); // reflect the reset immediately before returning
+        draw();
         return; // stopPlayback() already cancelled rafId; don't re-schedule.
     }
 
@@ -2862,13 +2864,15 @@ function chartTimeNow() {
 }
 
 async function _recMidiInit() {
-    if (_recMidiAccess) return;
-    if (!navigator.requestMIDIAccess) return;
+    if (_recMidiAccess) return true;
+    if (!navigator.requestMIDIAccess) return true;
     try {
         _recMidiAccess = await navigator.requestMIDIAccess({ sysex: false });
         _recMidiAccess.onstatechange = () => _recMidiUpdateDeviceList();
+        return true;
     } catch (e) {
         console.warn('[Editor] MIDI access denied:', e);
+        return false;
     }
 }
 
@@ -3012,8 +3016,14 @@ window.editorShowRecordMidiModal = async () => {
         if (startBtn) startBtn.disabled = true;
     } else {
         if (noWebMidi) noWebMidi.classList.add('hidden');
-        await _recMidiInit();
-        _recMidiUpdateDeviceList();
+        const granted = await _recMidiInit();
+        if (!granted) {
+            status.textContent = 'MIDI access denied — grant permission in browser settings and reopen.';
+            if (startBtn) startBtn.disabled = true;
+        } else {
+            status.textContent = '';
+            _recMidiUpdateDeviceList();
+        }
     }
 
     modal.classList.remove('hidden');
