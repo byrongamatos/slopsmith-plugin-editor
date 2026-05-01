@@ -1408,6 +1408,7 @@ function playbackTick() {
             stopPlayback();
         }
         S.cursorTime = 0;
+        return; // stopPlayback() already cancelled rafId; don't re-schedule.
     }
 
     // Auto-scroll to follow cursor
@@ -3077,6 +3078,9 @@ window.editorStartRecordMidi = () => {
     flattenChords();
     if (typeof updatePianoRange === 'function') updatePianoRange();
     updateArrangementSelector();
+    // Lock the selector for the duration of the take so a mid-recording
+    // switch can't make Stop finalize into a stale arrangement index.
+    if (arrSel) arrSel.disabled = true;
 
     _recHeld.clear();
     _recPending.clear();
@@ -3156,6 +3160,16 @@ window.editorStopRecordMidi = () => {
     _recNotes.sort((a, b) => a.time - b.time);
     const arr = S.arrangements[_recArrIdx];
     if (arr) arr.notes = _recNotes;
+
+    // Restore focus to the recorded arrangement (user may have switched the
+    // selector via keyboard / OS events that bypass the disabled flag) and
+    // unlock the selector now that the take is final.
+    S.currentArr = _recArrIdx;
+    const arrSelStop = document.getElementById('editor-arrangement');
+    if (arrSelStop) {
+        arrSelStop.disabled = false;
+        arrSelStop.value = String(_recArrIdx);
+    }
 
     // Clear the ghost overlay BEFORE the redraw so the new notes don't
     // render twice (once as real notes, once as translucent ghosts).
