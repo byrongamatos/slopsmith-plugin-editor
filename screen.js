@@ -2902,7 +2902,8 @@ function _recMidiUpdateDeviceList() {
     for (const inp of inputs) {
         const opt = document.createElement('option');
         opt.value = inp.id;
-        opt.textContent = inp.name;
+        const label = inp.name || inp.manufacturer || `MIDI Device (${inp.id})`;
+        opt.textContent = label;
         if (inp.id === saved) opt.selected = true;
         sel.appendChild(opt);
     }
