@@ -790,6 +790,10 @@ function onMouseDown(e) {
         return;
     }
 
+    // Block note editing while recording: mid-take edits to arr.notes would be
+    // silently overwritten by _recNotes when the take is finalized on Stop.
+    if (_recState === 'recording') return;
+
     // Check for sustain edge grab first
     const edgeIdx = hitNoteEdge(x, y);
     if (edgeIdx >= 0) {
@@ -985,6 +989,7 @@ function onMouseUp(e) {
 }
 
 function onDblClick(e) {
+    if (_recState === 'recording') return;  // block note addition during active take
     const { x, y } = getMousePos(e);
     const keysMode = isKeysMode();
     const laneBottom = keysMode
@@ -1100,6 +1105,7 @@ function onKeyDown(e) {
     }
 
     if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (_recState === 'recording') return;  // block deletion during active take
         if (S.sel.size && !e.target.matches('input, select, textarea')) {
             e.preventDefault();
             S.history.exec(new DeleteNotesCmd([...S.sel]));
@@ -1110,11 +1116,13 @@ function onKeyDown(e) {
     }
 
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        if (_recState === 'recording') return;  // block undo during active take
         e.preventDefault();
         editorUndo();
         return;
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
+        if (_recState === 'recording') return;  // block redo during active take
         e.preventDefault();
         editorRedo();
         return;
@@ -1149,6 +1157,7 @@ function onKeyDown(e) {
         }
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        if (_recState === 'recording') return;  // block paste during active take
         if (S.clipboard && S.clipboard.notes.length && !e.target.matches('input, select, textarea')) {
             e.preventDefault();
             const pasteTime = S.cursorTime;
