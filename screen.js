@@ -1555,6 +1555,9 @@ function updateArrangementSelector() {
         if (!navigator.requestMIDIAccess) {
             recBtn.disabled = true;
             recBtn.title = 'Web MIDI not available — use Chrome or Edge.';
+        } else {
+            recBtn.disabled = false;
+            recBtn.title = 'Record a Keys arrangement live from a MIDI keyboard (Chrome/Edge)';
         }
     }
 
@@ -3161,6 +3164,15 @@ window.editorStopRecordMidi = () => {
     const stopTime = Math.min(chartTimeNow(), S.duration || Infinity);
     stopPlayback();
 
+    // When the take finalized at EOF (e.g. via audioSource.onended in a
+    // backgrounded tab where playbackTick was throttled), playbackTick's
+    // cursor-reset branch never ran. Reset here so the next playback
+    // starts from 0, not from a stale end-of-song position.
+    if (S.duration && stopTime >= S.duration) {
+        S.cursorTime = 0;
+        if (typeof updateTimeDisplay === 'function') updateTimeDisplay();
+    }
+
     // Cap any still-held notes (key never released).
     for (const [pitch, queue] of _recHeld) {
         for (const { onTime } of queue) _recFinalizeNote(pitch, onTime, stopTime);
@@ -3216,15 +3228,19 @@ window.editorStopRecordMidi = () => {
 
 function drawGhostNotes() {
     if (!ghostNotes || !ghostNotes.length || !isKeysMode()) return;
+    const w = canvas.width / DPR;
+    const st = S.scrollX - 2;
+    const et = S.scrollX + (w - LABEL_W) / S.zoom + 2;
     ctx.save();
     ctx.globalAlpha = 0.45;
     ctx.fillStyle = '#f43f5e';   // rose-500 — echoes the Record button
     for (const n of ghostNotes) {
+        if (n.time + (n.sustain || 0) < st || n.time > et) continue;
         const midi = noteToMidi(n.string, n.fret);
         const x = timeToX(n.time);
         const y = midiToY(midi);
-        const w = Math.max(2, (n.sustain || 0) * S.zoom);
-        ctx.fillRect(x, y, w + 2, Math.max(2, PIANO_LANE_H - 1));
+        const nw = Math.max(2, (n.sustain || 0) * S.zoom);
+        ctx.fillRect(x, y, nw + 2, Math.max(2, PIANO_LANE_H - 1));
     }
     ctx.restore();
 }
