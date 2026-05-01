@@ -780,6 +780,9 @@ function onMouseDown(e) {
 
     // Left button
     if (y < WAVEFORM_H) {
+        // Block waveform seek while recording: restarting the AudioBufferSourceNode
+        // would fire onended and prematurely finalize the take.
+        if (_recState === 'recording') return;
         // Click on waveform = set cursor
         S.cursorTime = Math.max(0, xToTime(x));
         if (S.playing) { stopPlayback(); startPlayback(); }
@@ -2928,7 +2931,7 @@ function _recMidiConnect(id) {
 
 function _recMidiOnMessage(e) {
     if (_recState !== 'recording') return;
-    const [status, note, velocity] = e.data;
+    const [status, data1, velocity] = e.data;
     const ch = status & 0x0F;
     if (_recChannel >= 0 && ch !== _recChannel) return;
     const cmd = status & 0xF0;
@@ -2937,6 +2940,7 @@ function _recMidiOnMessage(e) {
         // Note on — push held entry (FIFO supports rapid retriggers).
         // Tag with `ch` so multi-channel layered/split keyboards in
         // "All channels" mode can pair note-offs with the correct take.
+        const note = data1;
         let q = _recHeld.get(note);
         if (!q) { q = []; _recHeld.set(note, q); }
         q.push({ onTime: chartTimeNow(), channel: ch });
@@ -2944,6 +2948,7 @@ function _recMidiOnMessage(e) {
         // Note off — match the oldest held entry from the same channel.
         // Without the channel match, two layered channels playing the same
         // pitch would close each other's notes in arbitrary order.
+        const note = data1;
         const q = _recHeld.get(note);
         if (!q || !q.length) return;
         const idx = q.findIndex(e => e.channel === ch);
@@ -2957,7 +2962,7 @@ function _recMidiOnMessage(e) {
         } else {
             _recFinalizeNote(note, entry.onTime, chartTimeNow());
         }
-    } else if (cmd === 0xB0 && note === 64) {
+    } else if (cmd === 0xB0 && data1 === 64) {
         // CC64 sustain pedal — per-channel state so layered/split keyboards
         // that emit CC64 on multiple channels don't cross-flush takes.
         if (velocity >= 64) {
