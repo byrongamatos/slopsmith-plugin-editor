@@ -3165,10 +3165,10 @@ window.editorStopRecordMidi = () => {
     // selector via keyboard / OS events that bypass the disabled flag) and
     // unlock the selector now that the take is final.
     S.currentArr = _recArrIdx;
-    const arrSelStop = document.getElementById('editor-arrangement');
-    if (arrSelStop) {
-        arrSelStop.disabled = false;
-        arrSelStop.value = String(_recArrIdx);
+    const arrSel = document.getElementById('editor-arrangement');
+    if (arrSel) {
+        arrSel.disabled = false;
+        arrSel.value = String(_recArrIdx);
     }
 
     // Clear the ghost overlay BEFORE the redraw so the new notes don't
