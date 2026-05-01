@@ -2865,7 +2865,7 @@ function chartTimeNow() {
 
 async function _recMidiInit() {
     if (_recMidiAccess) return true;
-    if (!navigator.requestMIDIAccess) return true;
+    if (!navigator.requestMIDIAccess) return false;
     try {
         _recMidiAccess = await navigator.requestMIDIAccess({ sysex: false });
         _recMidiAccess.onstatechange = () => _recMidiUpdateDeviceList();
@@ -3018,7 +3018,7 @@ window.editorShowRecordMidiModal = async () => {
         if (noWebMidi) noWebMidi.classList.add('hidden');
         const granted = await _recMidiInit();
         if (!granted) {
-            status.textContent = 'MIDI access denied — grant permission in browser settings and reopen.';
+            status.textContent = 'MIDI access denied — grant permission in browser settings and reload this page.';
             if (startBtn) startBtn.disabled = true;
         } else {
             status.textContent = '';
