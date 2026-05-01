@@ -1104,8 +1104,13 @@ function onKeyDown(e) {
         return;
     }
 
+    // Block all note-mutating shortcuts while a take is active so mid-take
+    // edits can't be silently overwritten when arr.notes = _recNotes on Stop.
+    // Spacebar (above) is still allowed because it routes to editorTogglePlay
+    // → editorStopRecordMidi, which cleanly finalizes the take.
+    if (_recState === 'recording') return;
+
     if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (_recState === 'recording') return;  // block deletion during active take
         if (S.sel.size && !e.target.matches('input, select, textarea')) {
             e.preventDefault();
             S.history.exec(new DeleteNotesCmd([...S.sel]));
@@ -1116,13 +1121,11 @@ function onKeyDown(e) {
     }
 
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-        if (_recState === 'recording') return;  // block undo during active take
         e.preventDefault();
         editorUndo();
         return;
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
-        if (_recState === 'recording') return;  // block redo during active take
         e.preventDefault();
         editorRedo();
         return;
@@ -1157,7 +1160,6 @@ function onKeyDown(e) {
         }
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-        if (_recState === 'recording') return;  // block paste during active take
         if (S.clipboard && S.clipboard.notes.length && !e.target.matches('input, select, textarea')) {
             e.preventDefault();
             const pasteTime = S.cursorTime;
