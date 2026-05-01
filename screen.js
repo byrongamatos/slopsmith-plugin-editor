@@ -289,6 +289,7 @@ function draw() {
     drawBeatBar(w);
     drawNotes(w);
     drawSelectionRect(w);
+    drawGhostNotes();
     drawCursor(w, h);
     drawLabels(w);
 
@@ -1398,7 +1399,14 @@ function playbackTick() {
     if (!S.playing) return;
     S.cursorTime = S.playStartTime + (S.audioCtx.currentTime - S.playStartWall);
     if (S.cursorTime >= S.duration) {
-        stopPlayback();
+        // If a live MIDI recording is active, finalize it at the song end
+        // before resetting the cursor — otherwise chartTimeNow() keeps
+        // advancing past S.duration and emits notes beyond the chart.
+        if (_recState === 'recording') {
+            editorStopRecordMidi();
+        } else {
+            stopPlayback();
+        }
         S.cursorTime = 0;
     }
 
@@ -1534,6 +1542,19 @@ function updateArrangementSelector() {
         keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak');
     }
 
+    // Show "● Record" (live MIDI) button on sloppak sessions only — PSARC's
+    // add-arrangement path requires an xml_path we can't synthesize, and
+    // PSARC build silently drops extra arrangements anyway. Mirror the
+    // "+ Keys" gate exactly so users only see Record where it persists.
+    const recBtn = document.getElementById('editor-record-midi-btn');
+    if (recBtn) {
+        recBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak');
+        if (!navigator.requestMIDIAccess) {
+            recBtn.disabled = true;
+            recBtn.title = 'Web MIDI not available — use Chrome or Edge.';
+        }
+    }
+
     // Show remove button when there are multiple arrangements
     const removeBtn = document.getElementById('editor-remove-arr-btn');
     if (removeBtn) {
@@ -1642,6 +1663,11 @@ function filterSongs(q) {
 
 async function saveCDLC() {
     if (!S.sessionId) return;
+    // If a live MIDI take is in flight, finalize it first so its notes
+    // get committed into S.arrangements[_recArrIdx] before we serialize.
+    // Without this, Save mid-recording would persist the new Keys
+    // arrangement with notes: [] and discard the take.
+    if (_recState === 'recording') editorStopRecordMidi();
     setStatus('Saving...');
 
     // Sloppak save sends the full S.arrangements snapshot, so every
@@ -1763,6 +1789,13 @@ window.editorSave = saveCDLC;
 window.editorUndo = () => S.history && S.history.doUndo();
 window.editorRedo = () => S.history && S.history.doRedo();
 window.editorTogglePlay = () => {
+    // Route stops through the recorder while a take is active so the
+    // spacebar (or any other transport caller) finalizes the recording
+    // cleanly instead of leaving _recState stuck in 'recording'.
+    if (_recState === 'recording') {
+        editorStopRecordMidi();
+        return;
+    }
     if (S.playing) stopPlayback(); else startPlayback();
 };
 window.editorZoom = (dir) => {
@@ -2805,6 +2838,357 @@ window.editorAddEmptyKeys = async () => {
         _addingEmptyKeys = false;
     }
 };
+
+// ════════════════════════════════════════════════════════════════════
+// Record Keys arrangement live from a MIDI keyboard (Web MIDI API)
+// ════════════════════════════════════════════════════════════════════
+
+let _recMidiAccess = null;
+let _recMidiInput = null;
+let _recState = 'idle';                    // idle | recording | finalizing
+let _recChannel = -1;                      // -1 = all, else 0..15
+const _recHeld = new Map();                // pitch -> [{onTime, channel}, ...] FIFO
+const _recPending = new Map();             // pitch -> [{onTime, channel}, ...] FIFO (pedal-deferred)
+const _recSustainOn = new Set();           // channels with CC64 pedal currently held
+let _recNotes = [];                        // finalized {time,string,fret,sustain,techniques}
+let _recArrIdx = -1;                       // index of the in-progress Keys arrangement
+let ghostNotes = null;                     // alias of _recNotes while recording (for drawGhostNotes)
+
+function chartTimeNow() {
+    // editorStartRecordMidi guards against !S.audioCtx, so this only runs
+    // during an active recording with a loaded audio context.
+    return S.playStartTime + (S.audioCtx.currentTime - S.playStartWall);
+}
+
+async function _recMidiInit() {
+    if (_recMidiAccess) return;
+    if (!navigator.requestMIDIAccess) return;
+    try {
+        _recMidiAccess = await navigator.requestMIDIAccess({ sysex: false });
+        _recMidiAccess.onstatechange = () => _recMidiUpdateDeviceList();
+    } catch (e) {
+        console.warn('[Editor] MIDI access denied:', e);
+    }
+}
+
+function _recMidiUpdateDeviceList() {
+    const sel = document.getElementById('editor-record-midi-device');
+    const noDevice = document.getElementById('editor-record-midi-no-device');
+    const startBtn = document.getElementById('editor-record-midi-start');
+    if (!sel) return;
+    const inputs = [];
+    if (_recMidiAccess) _recMidiAccess.inputs.forEach(inp => inputs.push(inp));
+
+    const saved = localStorage.getItem('editor.recordMidiDeviceId') || '';
+    // Build options with createElement so device-supplied id/name strings
+    // can't break out into HTML — Web MIDI metadata comes from the OS/USB
+    // descriptor and isn't safe to interpolate via innerHTML.
+    sel.replaceChildren();
+    for (const inp of inputs) {
+        const opt = document.createElement('option');
+        opt.value = inp.id;
+        opt.textContent = inp.name;
+        if (inp.id === saved) opt.selected = true;
+        sel.appendChild(opt);
+    }
+
+    const empty = !inputs.length;
+    if (noDevice) noDevice.classList.toggle('hidden', !empty);
+    if (startBtn) startBtn.disabled = empty;
+}
+
+function _recMidiConnect(id) {
+    if (_recMidiInput) _recMidiInput.onmidimessage = null;
+    _recMidiInput = null;
+    if (!_recMidiAccess) return;
+    _recMidiAccess.inputs.forEach(inp => {
+        if (inp.id === id) {
+            _recMidiInput = inp;
+            _recMidiInput.onmidimessage = _recMidiOnMessage;
+            localStorage.setItem('editor.recordMidiDeviceId', id);
+        }
+    });
+}
+
+function _recMidiOnMessage(e) {
+    if (_recState !== 'recording') return;
+    const [status, note, velocity] = e.data;
+    const ch = status & 0x0F;
+    if (_recChannel >= 0 && ch !== _recChannel) return;
+    const cmd = status & 0xF0;
+
+    if (cmd === 0x90 && velocity > 0) {
+        // Note on — push held entry (FIFO supports rapid retriggers).
+        // Tag with `ch` so multi-channel layered/split keyboards in
+        // "All channels" mode can pair note-offs with the correct take.
+        let q = _recHeld.get(note);
+        if (!q) { q = []; _recHeld.set(note, q); }
+        q.push({ onTime: chartTimeNow(), channel: ch });
+    } else if (cmd === 0x80 || (cmd === 0x90 && velocity === 0)) {
+        // Note off — match the oldest held entry from the same channel.
+        // Without the channel match, two layered channels playing the same
+        // pitch would close each other's notes in arbitrary order.
+        const q = _recHeld.get(note);
+        if (!q || !q.length) return;
+        const idx = q.findIndex(e => e.channel === ch);
+        if (idx < 0) return;
+        const [entry] = q.splice(idx, 1);
+        if (!q.length) _recHeld.delete(note);
+        if (_recSustainOn.has(ch)) {
+            let p = _recPending.get(note);
+            if (!p) { p = []; _recPending.set(note, p); }
+            p.push(entry);
+        } else {
+            _recFinalizeNote(note, entry.onTime, chartTimeNow());
+        }
+    } else if (cmd === 0xB0 && note === 64) {
+        // CC64 sustain pedal — per-channel state so layered/split keyboards
+        // that emit CC64 on multiple channels don't cross-flush takes.
+        if (velocity >= 64) {
+            _recSustainOn.add(ch);
+        } else {
+            _recSustainOn.delete(ch);
+            const off = chartTimeNow();
+            for (const [pitch, queue] of _recPending) {
+                const remaining = [];
+                for (const entry of queue) {
+                    if (entry.channel === ch) {
+                        _recFinalizeNote(pitch, entry.onTime, off);
+                    } else {
+                        remaining.push(entry);
+                    }
+                }
+                if (remaining.length) _recPending.set(pitch, remaining);
+                else _recPending.delete(pitch);
+            }
+        }
+    }
+}
+
+function _recFinalizeNote(pitch, onTime, offTime) {
+    const sustain = Math.max(0, offTime - onTime);
+    _recNotes.push({
+        time: onTime,
+        string: Math.floor(pitch / 24),
+        fret: pitch % 24,
+        sustain: sustain < 0.05 ? 0 : sustain,
+        techniques: {},
+    });
+    _recCount();
+}
+
+function _recCount() {
+    const el = document.getElementById('editor-record-midi-count');
+    if (el) el.textContent = _recNotes.length + ' notes';
+}
+
+window.editorShowRecordMidiModal = async () => {
+    if (!S.sessionId) return;
+    const modal = document.getElementById('editor-record-midi-modal');
+    const setup = document.getElementById('editor-record-midi-setup');
+    const active = document.getElementById('editor-record-midi-active');
+    const status = document.getElementById('editor-record-midi-status');
+    const noWebMidi = document.getElementById('editor-record-midi-no-webmidi');
+    const startBtn = document.getElementById('editor-record-midi-start');
+    const chanSel = document.getElementById('editor-record-midi-channel');
+
+    setup.classList.remove('hidden');
+    active.classList.add('hidden');
+    status.textContent = '';
+
+    // Populate channel dropdown 1..16 once.
+    if (chanSel.options.length === 1) {
+        for (let i = 1; i <= 16; i++) {
+            const opt = document.createElement('option');
+            opt.value = String(i - 1);
+            opt.textContent = String(i);
+            chanSel.appendChild(opt);
+        }
+    }
+
+    if (!navigator.requestMIDIAccess) {
+        if (noWebMidi) noWebMidi.classList.remove('hidden');
+        if (startBtn) startBtn.disabled = true;
+    } else {
+        if (noWebMidi) noWebMidi.classList.add('hidden');
+        await _recMidiInit();
+        _recMidiUpdateDeviceList();
+    }
+
+    modal.classList.remove('hidden');
+};
+
+window.editorHideRecordMidiModal = () => {
+    // Refuse to close while a take is active — explicit Stop is required.
+    if (_recState !== 'idle') return;
+    document.getElementById('editor-record-midi-modal').classList.add('hidden');
+};
+
+window.editorStartRecordMidi = () => {
+    if (_recState !== 'idle') return;
+    const sel = document.getElementById('editor-record-midi-device');
+    const chanSel = document.getElementById('editor-record-midi-channel');
+    const status = document.getElementById('editor-record-midi-status');
+    const setup = document.getElementById('editor-record-midi-setup');
+    const active = document.getElementById('editor-record-midi-active');
+    if (S.format !== 'sloppak' || !S.sessionId) {
+        status.textContent = 'Recording requires a sloppak editing session.';
+        return;
+    }
+    if (!S.audioBuffer || !S.audioCtx) {
+        status.textContent = 'Audio not loaded — cannot derive note timing.';
+        return;
+    }
+    if (!sel || !sel.value) {
+        status.textContent = 'Select a MIDI device first.';
+        return;
+    }
+    _recMidiConnect(sel.value);
+    if (!_recMidiInput) {
+        status.textContent = 'Failed to connect to MIDI device.';
+        return;
+    }
+
+    // Splice + start playback synchronously inside the click handler:
+    //   (a) Chrome/Edge autoplay policy requires the AudioContext.resume()
+    //       inside startPlayback() to fire during the user-gesture grace
+    //       period — an awaited fetch would expire it and the transport
+    //       would never advance, putting every captured note at t=0.
+    //   (b) Punch-in (Record while already playing) must arm at the exact
+    //       playhead the user clicked from, not wherever audio drifted to
+    //       during a network round-trip.
+    // The /add-arrangement POST is fired-and-forgotten — for sloppak it's
+    // a no-op acknowledgement, and saving the session commits whatever
+    // is in S.arrangements regardless.
+    const arrangement = {
+        name: _uniqueKeysName(),
+        tuning: [0, 0, 0, 0, 0, 0],
+        capo: 0,
+        notes: [],
+        chords: [],
+        chord_templates: [],
+    };
+
+    S.arrangements.push(arrangement);
+    S.currentArr = S.arrangements.length - 1;
+    _recArrIdx = S.currentArr;
+    const arrSel = document.getElementById('editor-arrangement');
+    if (arrSel) arrSel.value = S.currentArr;
+    flattenChords();
+    if (typeof updatePianoRange === 'function') updatePianoRange();
+    updateArrangementSelector();
+
+    _recHeld.clear();
+    _recPending.clear();
+    _recSustainOn.clear();
+    _recNotes = [];
+    _recCount();
+    _recChannel = parseInt(chanSel.value);
+    if (Number.isNaN(_recChannel)) _recChannel = -1;
+
+    setup.classList.add('hidden');
+    active.classList.remove('hidden');
+    status.textContent = '';
+
+    ghostNotes = _recNotes;
+    _recState = 'recording';
+    // Restart cleanly if a playback is already running — startPlayback()
+    // allocates a fresh AudioBufferSourceNode and overwrites S.audioSource,
+    // which would otherwise orphan the existing source and desync stop.
+    // Refresh S.cursorTime from chartTimeNow() before the restart so
+    // punch-in resumes from the actual audio position, not the last
+    // playbackTick() snapshot (which can lag on throttled/slow frames).
+    if (S.playing) {
+        S.cursorTime = chartTimeNow();
+        stopPlayback();
+    }
+    startPlayback();
+
+    // Reliable end-of-song finalize: rAF (playbackTick) can be throttled
+    // or paused in backgrounded tabs and miss the EOF clamp, leaving
+    // _recState='recording' after audio actually ends. AudioBufferSourceNode's
+    // onended fires regardless of tab visibility. The state guard inside
+    // also makes this a no-op when stopPlayback() triggers onended via
+    // explicit Stop / spacebar — those paths set _recState='finalizing'
+    // before audioSource.stop() runs.
+    if (S.audioSource) {
+        S.audioSource.onended = () => {
+            if (_recState === 'recording') editorStopRecordMidi();
+        };
+    }
+
+    fetch('/api/plugins/editor/add-arrangement', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: S.sessionId, arrangement }),
+    }).catch(e => console.warn('[Editor] add-arrangement registration failed:', e));
+};
+
+window.editorStopRecordMidi = () => {
+    if (_recState !== 'recording') return;
+    _recState = 'finalizing';
+
+    // Capture stop-time before stopping audio so the chart-time formula
+    // still reads the in-flight playhead. Clamp to S.duration: when this
+    // path is reached via the EOF branch in playbackTick, chartTimeNow()
+    // has already crossed the song boundary, and any held/pedal-deferred
+    // notes would otherwise be finalized past the chart length.
+    const stopTime = Math.min(chartTimeNow(), S.duration || Infinity);
+    stopPlayback();
+
+    // Cap any still-held notes (key never released).
+    for (const [pitch, queue] of _recHeld) {
+        for (const { onTime } of queue) _recFinalizeNote(pitch, onTime, stopTime);
+    }
+    _recHeld.clear();
+    // Cap any pedal-deferred notes (sustain still down at stop).
+    for (const [pitch, queue] of _recPending) {
+        for (const { onTime } of queue) _recFinalizeNote(pitch, onTime, stopTime);
+    }
+    _recPending.clear();
+    _recSustainOn.clear();
+
+    if (_recMidiInput) _recMidiInput.onmidimessage = null;
+
+    // Populate the target arrangement registered at Start time. No second
+    // POST: the arrangement was already registered with the backend, so
+    // the splice is purely an in-memory note swap.
+    _recNotes.sort((a, b) => a.time - b.time);
+    const arr = S.arrangements[_recArrIdx];
+    if (arr) arr.notes = _recNotes;
+
+    // Clear the ghost overlay BEFORE the redraw so the new notes don't
+    // render twice (once as real notes, once as translucent ghosts).
+    ghostNotes = null;
+    _recState = 'idle';
+
+    flattenChords();
+    if (typeof updatePianoRange === 'function') updatePianoRange();
+    updateArrangementSelector();
+    updateStatus();
+    draw();
+
+    document.getElementById('editor-record-midi-modal').classList.add('hidden');
+    const n = arr ? arr.notes.length : 0;
+    setStatus(n
+        ? `Recorded Keys arrangement (${n} notes). Save to commit.`
+        : 'Stopped — no notes captured. The empty Keys arrangement is in the switcher.');
+};
+
+function drawGhostNotes() {
+    if (!ghostNotes || !ghostNotes.length || !isKeysMode()) return;
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = '#f43f5e';   // rose-500 — echoes the Record button
+    for (const n of ghostNotes) {
+        const midi = noteToMidi(n.string, n.fret);
+        const x = timeToX(n.time);
+        const y = midiToY(midi);
+        const w = Math.max(2, (n.sustain || 0) * S.zoom);
+        ctx.fillRect(x, y, w + 2, Math.max(2, PIANO_LANE_H - 1));
+    }
+    ctx.restore();
+}
 
 // Run init after DOM is ready
 if (document.getElementById('editor-canvas')) {
