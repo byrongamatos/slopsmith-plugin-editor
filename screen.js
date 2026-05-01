@@ -2935,12 +2935,12 @@ function _recMidiOnMessage(e) {
     const ch = status & 0x0F;
     if (_recChannel >= 0 && ch !== _recChannel) return;
     const cmd = status & 0xF0;
+    const note = data1;  // semantic alias: note number for on/off, cc number for B0 messages
 
     if (cmd === 0x90 && velocity > 0) {
         // Note on — push held entry (FIFO supports rapid retriggers).
         // Tag with `ch` so multi-channel layered/split keyboards in
         // "All channels" mode can pair note-offs with the correct take.
-        const note = data1;
         let q = _recHeld.get(note);
         if (!q) { q = []; _recHeld.set(note, q); }
         q.push({ onTime: chartTimeNow(), channel: ch });
@@ -2948,7 +2948,6 @@ function _recMidiOnMessage(e) {
         // Note off — match the oldest held entry from the same channel.
         // Without the channel match, two layered channels playing the same
         // pitch would close each other's notes in arbitrary order.
-        const note = data1;
         const q = _recHeld.get(note);
         if (!q || !q.length) return;
         const idx = q.findIndex(e => e.channel === ch);
