@@ -2862,6 +2862,7 @@ let _recArrIdx = -1;                       // index of the in-progress Keys arra
 let ghostNotes = null;                     // alias of _recNotes while recording (for drawGhostNotes)
 let _recCountEl = null;                    // cached count DOM element (set at record-start)
 let _recCountLastMs = 0;                   // last timestamp _recCount updated the DOM
+const REC_COUNT_THROTTLE_MS = 80;          // max DOM update rate for the note counter
 
 function chartTimeNow() {
     // editorStartRecordMidi guards against !S.audioCtx, so this only runs
@@ -2990,7 +2991,7 @@ function _recFinalizeNote(pitch, onTime, offTime) {
 
 function _recCount() {
     const now = performance.now();
-    if (now - _recCountLastMs < 80) return;   // throttle: at most once per ~80 ms
+    if (now - _recCountLastMs < REC_COUNT_THROTTLE_MS) return;   // throttle DOM writes
     _recCountLastMs = now;
     if (_recCountEl) _recCountEl.textContent = _recNotes.length + ' notes';
 }
