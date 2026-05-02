@@ -21,6 +21,9 @@ from fastapi.responses import FileResponse, JSONResponse
 import yaml
 
 
+_sessions = None
+
+
 def setup(app, context):
     config_dir = context["config_dir"]
     get_dlc_dir = context["get_dlc_dir"]
@@ -113,6 +116,9 @@ def setup(app, context):
 
     # Active editing sessions: session_id -> {dir, audio_file, filename, song_data}
     sessions = {}
+
+    global _sessions
+    _sessions = sessions
 
     def _arrangement_id(name: str, used: set) -> str:
         """Map an arrangement name to a stable filesystem-safe id, avoiding
@@ -432,6 +438,7 @@ def setup(app, context):
             "xml_files": xml_files,
             "format": "sloppak" if is_sloppak else "psarc",
             "sloppak_state": sloppak_state,
+            "last_touched": time.time(),
         }
         result["session_id"] = session_id
         return result
@@ -444,6 +451,7 @@ def setup(app, context):
         session = sessions.get(session_id)
         if not session:
             return JSONResponse({"error": "No active session"}, 400)
+        session["last_touched"] = time.time()
 
         raw_arr_idx = data.get("arrangement_index")
         if raw_arr_idx is None:
@@ -1068,6 +1076,7 @@ def setup(app, context):
                 "title": title, "artist": artist,
                 "album": album, "year": year,
             },
+            "last_touched": time.time(),
         }
         result["session_id"] = session_id
         result["create_mode"] = True
@@ -1337,6 +1346,7 @@ def setup(app, context):
         session = sessions.get(session_id)
         if not session:
             return JSONResponse({"error": "No active session"}, 400)
+        session["last_touched"] = time.time()
 
         raw_idx = data.get("arrangement_index")
         if raw_idx is None:
@@ -1398,6 +1408,7 @@ def setup(app, context):
         session = sessions.get(session_id)
         if not session:
             return JSONResponse({"error": "No active session"}, 400)
+        session["last_touched"] = time.time()
 
         arrangement = data.get("arrangement")
         xml_path = data.get("xml_path", "")
@@ -1434,6 +1445,7 @@ def setup(app, context):
         session = sessions.get(session_id)
         if not session or not session.get("create_mode"):
             return JSONResponse({"error": "No active create session"}, 400)
+        session["last_touched"] = time.time()
 
         arrangements_data = data.get("arrangements", [])
         beats = data.get("beats", [])
