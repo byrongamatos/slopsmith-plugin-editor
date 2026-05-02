@@ -21,6 +21,9 @@ from fastapi.responses import FileResponse, JSONResponse
 import yaml
 
 
+_sessions = None
+
+
 def setup(app, context):
     config_dir = context["config_dir"]
     get_dlc_dir = context["get_dlc_dir"]
@@ -114,8 +117,8 @@ def setup(app, context):
     # Active editing sessions: session_id -> {dir, audio_file, filename, song_data}
     sessions = {}
 
-    import sys as _sys
-    _sys.modules[__name__]._sessions = sessions
+    global _sessions
+    _sessions = sessions
 
     def _arrangement_id(name: str, used: set) -> str:
         """Map an arrangement name to a stable filesystem-safe id, avoiding
