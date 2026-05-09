@@ -25,6 +25,7 @@ _sessions = None
 
 
 def setup(app, context):
+    log = context["log"]
     config_dir = context["config_dir"]
     get_dlc_dir = context["get_dlc_dir"]
 
@@ -273,7 +274,7 @@ def setup(app, context):
                     shutil.copy2(audio_path, dest)
                     audio_url = f"{STORAGE_URL}/editor_audio_{audio_id}{ext}"
                 except Exception as e:
-                    print(f"[Editor] Audio conversion failed: {e}")
+                    log.warning("Audio conversion failed: %s", e)
 
             # Find the arrangement XML files for later save
             xml_files = []
@@ -793,6 +794,66 @@ def setup(app, context):
             return result
         except Exception as e:
             return JSONResponse({"error": str(e)}, 500)
+
+    # ── Replace audio on a loaded session ────────────────────────────
+
+    @app.post("/api/plugins/editor/replace-audio")
+    async def replace_audio(data: dict):
+        """Swap the audio track for a loaded session.
+
+        Sloppak sessions persist immediately by copying the new audio into
+        `<source_dir>/stems/` and rewriting `manifest.yaml` to reference a
+        single "full" stem. The wholesale stems-replacement is intentional —
+        if a project shipped multi-stem (guitar/bass/drums splits), merely
+        swapping the "full" entry would leave the other entries pointing at
+        the now-stale mix.
+
+        PSARC and create-mode sessions update only `session["audio_file"]`;
+        the next Build CDLC picks up the new audio. PSARCs reloaded from
+        disk before that build still play their original WEM (returned as
+        `persisted: false` so the UI can warn).
+        """
+        session_id = data.get("session_id", "")
+        audio_url = (data.get("audio_url") or "").strip()
+        session = sessions.get(session_id)
+        if not session:
+            return JSONResponse({"error": "session not found"}, 404)
+        src = _resolve_storage_url(audio_url)
+        if src is None or not src.exists():
+            return JSONResponse({"error": "invalid audio_url"}, 400)
+
+        session["last_touched"] = time.time()
+        session["audio_file"] = str(src)
+        persisted = False
+
+        if session.get("format") == "sloppak" and session.get("sloppak_state"):
+            try:
+                source_dir = Path(session["dir"]).resolve()
+                stems_dir = source_dir / "stems"
+                stems_dir.mkdir(parents=True, exist_ok=True)
+                safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", src.stem)[:60] or "full"
+                dest = (stems_dir / f"{safe_stem}{src.suffix}").resolve()
+                # Path traversal guard — mirrors _safe_stem_path.
+                try:
+                    dest.relative_to(source_dir)
+                except ValueError:
+                    return JSONResponse({"error": "stem path escapes session dir"}, 400)
+                shutil.copy2(src, dest)
+
+                manifest = dict(session["sloppak_state"].get("manifest") or {})
+                rel = f"stems/{dest.name}"
+                manifest["stems"] = [{"id": "full", "file": rel}]
+                (source_dir / "manifest.yaml").write_text(
+                    yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True),
+                    encoding="utf-8",
+                )
+                session["sloppak_state"]["manifest"] = manifest
+                persisted = True
+            except Exception as e:
+                log.warning("replace-audio sloppak persist failed: %s", e)
+                return JSONResponse({"error": f"persist failed: {e}"}, 500)
+
+        return {"audio_url": audio_url, "persisted": persisted}
 
     # ── Import Guitar Pro file ───────────────────────────────────────
 
@@ -1910,7 +1971,7 @@ def setup(app, context):
                     break
 
         if not rscli:
-            print("[Editor] RsCli not found, skipping SNG compilation")
+            log.warning("RsCli not found, skipping SNG compilation")
             return
 
         try:
@@ -1919,6 +1980,6 @@ def setup(app, context):
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
-                print(f"[Editor] xml2sng failed: {result.stderr}")
+                log.warning("xml2sng failed: %s", result.stderr)
         except Exception as e:
-            print(f"[Editor] xml2sng error: {e}")
+            log.warning("xml2sng error: %s", e)

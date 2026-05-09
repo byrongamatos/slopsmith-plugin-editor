@@ -1508,6 +1508,7 @@ async function loadCDLC(filename) {
         document.getElementById('editor-build-btn').classList.add('hidden');
         document.getElementById('editor-play-btn').disabled = !data.audio_url;
         document.getElementById('editor-sync-btn').classList.toggle('hidden', !data.audio_url);
+        document.getElementById('editor-replace-audio-btn').classList.remove('hidden');
         updateArrangementSelector();
         updateStatus();
         updateTimeDisplay();
@@ -2313,6 +2314,7 @@ window.editorDoCreate = async () => {
         document.getElementById('editor-build-btn').classList.remove('hidden');
         document.getElementById('editor-play-btn').disabled = !data.audio_url;
         document.getElementById('editor-sync-btn').classList.toggle('hidden', !data.audio_url);
+        document.getElementById('editor-replace-audio-btn').classList.remove('hidden');
         updateArrangementSelector();
         updateStatus();
         updateTimeDisplay();
@@ -2386,6 +2388,113 @@ window.editorBuild = async () => {
         // Re-flatten current arrangement for continued editing
         flattenChords();
         draw();
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════
+// Replace audio
+// ════════════════════════════════════════════════════════════════════
+
+let replaceAudioState = { audioMode: 'file', audioUrl: null };
+
+window.editorShowReplaceAudioModal = () => {
+    if (!S.sessionId) return;
+    replaceAudioState = { audioMode: 'file', audioUrl: null };
+    document.getElementById('editor-replace-audio').value = '';
+    document.getElementById('editor-replace-yt-url').value = '';
+    document.getElementById('editor-replace-audio-status').textContent = '';
+    document.getElementById('editor-replace-audio-apply').disabled = false;
+    document.getElementById('editor-replace-audio-modal').classList.remove('hidden');
+    editorSetReplaceAudioMode('file');
+};
+
+window.editorHideReplaceAudioModal = () => {
+    document.getElementById('editor-replace-audio-modal').classList.add('hidden');
+};
+
+window.editorSetReplaceAudioMode = (mode) => {
+    replaceAudioState.audioMode = mode;
+    document.getElementById('editor-replace-audio-file-input').classList.toggle('hidden', mode !== 'file');
+    document.getElementById('editor-replace-audio-yt-input').classList.toggle('hidden', mode !== 'youtube');
+    document.getElementById('editor-replace-mode-file').className =
+        'px-3 py-1 rounded text-xs ' + (mode === 'file' ? 'bg-accent' : 'bg-dark-600 hover:bg-dark-500');
+    document.getElementById('editor-replace-mode-yt').className =
+        'px-3 py-1 rounded text-xs ' + (mode === 'youtube' ? 'bg-accent' : 'bg-dark-600 hover:bg-dark-500');
+};
+
+async function _uploadReplaceAudio() {
+    const status = document.getElementById('editor-replace-audio-status');
+    if (replaceAudioState.audioMode === 'youtube') {
+        const url = document.getElementById('editor-replace-yt-url').value.trim();
+        if (!url) { status.textContent = 'Enter a YouTube URL'; return null; }
+        status.textContent = 'Downloading from YouTube...';
+        try {
+            const resp = await fetch('/api/plugins/editor/youtube-audio', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            const data = await resp.json();
+            if (data.error) { status.textContent = 'Error: ' + data.error; return null; }
+            status.textContent = 'Audio ready: ' + (data.title || 'downloaded');
+            return data.audio_url;
+        } catch (e) {
+            status.textContent = 'Download failed: ' + e.message;
+            return null;
+        }
+    }
+    const input = document.getElementById('editor-replace-audio');
+    if (!input.files.length) { status.textContent = 'Choose a file'; return null; }
+    status.textContent = 'Uploading audio...';
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+        const resp = await fetch('/api/plugins/editor/upload-audio', { method: 'POST', body: form });
+        const data = await resp.json();
+        if (data.error) { status.textContent = 'Error: ' + data.error; return null; }
+        status.textContent = 'Audio uploaded';
+        return data.audio_url;
+    } catch (e) {
+        status.textContent = 'Upload failed: ' + e.message;
+        return null;
+    }
+}
+
+window.editorApplyReplaceAudio = async () => {
+    if (!S.sessionId) return;
+    const status = document.getElementById('editor-replace-audio-status');
+    const apply = document.getElementById('editor-replace-audio-apply');
+    apply.disabled = true;
+    try {
+        const audioUrl = await _uploadReplaceAudio();
+        if (!audioUrl) { apply.disabled = false; return; }
+
+        const resp = await fetch('/api/plugins/editor/replace-audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: S.sessionId, audio_url: audioUrl }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            status.textContent = 'Error: ' + data.error;
+            apply.disabled = false;
+            return;
+        }
+
+        // Keep create-mode build in sync — Build CDLC reads createState.audioUrl.
+        if (S.createMode) createState.audioUrl = audioUrl;
+
+        await loadAudio(audioUrl);
+        document.getElementById('editor-play-btn').disabled = false;
+        document.getElementById('editor-sync-btn').classList.remove('hidden');
+        draw();
+
+        const persisted = data.persisted !== false;
+        editorHideReplaceAudioModal();
+        setStatus(persisted ? 'Audio replaced' : 'Audio replaced (rebuild PSARC to persist)');
+    } catch (e) {
+        status.textContent = 'Failed: ' + e.message;
+        apply.disabled = false;
     }
 };
 
