@@ -2484,14 +2484,26 @@ window.editorApplyReplaceAudio = async () => {
         // Keep create-mode build in sync — Build CDLC reads createState.audioUrl.
         if (S.createMode) createState.audioUrl = audioUrl;
 
+        // Stop active playback before swapping the buffer; otherwise the old
+        // BufferSource keeps playing under the new S.audioBuffer/duration and
+        // playbackTick desyncs against the new track length.
+        if (S.playing) stopPlayback();
         await loadAudio(audioUrl);
+        if (S.cursorTime > S.duration) S.cursorTime = 0;
         document.getElementById('editor-play-btn').disabled = false;
         document.getElementById('editor-sync-btn').classList.remove('hidden');
         draw();
 
-        const persisted = data.persisted !== false;
+        let msg;
+        if (data.persisted !== false) {
+            msg = 'Audio replaced';
+        } else if (S.createMode) {
+            msg = 'Audio replaced (will persist on next Build CDLC)';
+        } else {
+            msg = "Audio replaced (playback only — PSARC won't be repacked)";
+        }
         editorHideReplaceAudioModal();
-        setStatus(persisted ? 'Audio replaced' : 'Audio replaced (rebuild PSARC to persist)');
+        setStatus(msg);
     } catch (e) {
         status.textContent = 'Failed: ' + e.message;
         apply.disabled = false;
