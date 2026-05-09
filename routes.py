@@ -25,7 +25,6 @@ _sessions = None
 
 
 def setup(app, context):
-    log = context["log"]
     config_dir = context["config_dir"]
     get_dlc_dir = context["get_dlc_dir"]
 
@@ -274,7 +273,7 @@ def setup(app, context):
                     shutil.copy2(audio_path, dest)
                     audio_url = f"{STORAGE_URL}/editor_audio_{audio_id}{ext}"
                 except Exception as e:
-                    log.warning("Audio conversion failed: %s", e)
+                    print(f"[Editor] Audio conversion failed: {e}")
 
             # Find the arrangement XML files for later save
             xml_files = []
@@ -880,7 +879,7 @@ def setup(app, context):
                 else:
                     next_step = "save"
             except Exception as e:
-                log.warning("replace-audio sloppak persist failed: %s", e)
+                print(f"[Editor] replace-audio sloppak persist failed: {e}")
                 return JSONResponse({"error": f"persist failed: {e}"}, 500)
 
         return {"audio_url": audio_url, "persisted": persisted, "next_step": next_step}
@@ -2001,7 +2000,7 @@ def setup(app, context):
                     break
 
         if not rscli:
-            log.warning("RsCli not found, skipping SNG compilation")
+            print("[Editor] RsCli not found, skipping SNG compilation")
             return
 
         try:
@@ -2010,6 +2009,6 @@ def setup(app, context):
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
-                log.warning("xml2sng failed: %s", result.stderr)
+                print(f"[Editor] xml2sng failed: {result.stderr}")
         except Exception as e:
-            log.warning("xml2sng error: %s", e)
+            print(f"[Editor] xml2sng error: {e}")
