@@ -825,8 +825,17 @@ def setup(app, context):
         session["last_touched"] = time.time()
         session["audio_file"] = str(src)
         persisted = False
+        # next_step tells the client which UI hint to show when not persisted.
+        # "none"    — already on disk
+        # "save"    — zip-form sloppak: cache updated, Save will re-zip
+        # "build"   — create-mode: Build CDLC will produce a .psarc with the new audio
+        # "rebuild" — loaded PSARC: no in-editor persist path (would need WEM repack)
+        next_step = "rebuild"
+        if session.get("create_mode"):
+            next_step = "build"
 
         if session.get("format") == "sloppak" and session.get("sloppak_state"):
+            sloppak_form = session["sloppak_state"].get("form") or "zip"
             try:
                 source_dir = Path(session["dir"]).resolve()
                 stems_dir = source_dir / "stems"
@@ -848,12 +857,20 @@ def setup(app, context):
                     encoding="utf-8",
                 )
                 session["sloppak_state"]["manifest"] = manifest
-                persisted = True
+                # Only dir-form sloppaks are persisted: zip-form's source_dir is
+                # the unpack cache, so the on-disk .sloppak archive isn't touched
+                # until the user hits Save (which re-zips). Be honest about that
+                # to the UI so the user knows whether further action is needed.
+                if sloppak_form == "dir":
+                    persisted = True
+                    next_step = "none"
+                else:
+                    next_step = "save"
             except Exception as e:
                 log.warning("replace-audio sloppak persist failed: %s", e)
                 return JSONResponse({"error": f"persist failed: {e}"}, 500)
 
-        return {"audio_url": audio_url, "persisted": persisted}
+        return {"audio_url": audio_url, "persisted": persisted, "next_step": next_step}
 
     # ── Import Guitar Pro file ───────────────────────────────────────
 
