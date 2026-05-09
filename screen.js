@@ -2408,11 +2408,11 @@ window.editorBuild = async () => {
 // Replace audio
 // ════════════════════════════════════════════════════════════════════
 
-let replaceAudioState = { audioMode: 'file', audioUrl: null };
+let replaceAudioState = { audioMode: 'file' };
 
 window.editorShowReplaceAudioModal = () => {
     if (!S.sessionId) return;
-    replaceAudioState = { audioMode: 'file', audioUrl: null };
+    replaceAudioState = { audioMode: 'file' };
     document.getElementById('editor-replace-audio').value = '';
     document.getElementById('editor-replace-yt-url').value = '';
     document.getElementById('editor-replace-audio-status').textContent = '';

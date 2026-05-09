@@ -801,17 +801,30 @@ def setup(app, context):
     async def replace_audio(data: dict):
         """Swap the audio track for a loaded session.
 
-        Sloppak sessions persist immediately by copying the new audio into
-        `<source_dir>/stems/` and rewriting `manifest.yaml` to reference a
-        single "full" stem. The wholesale stems-replacement is intentional —
-        if a project shipped multi-stem (guitar/bass/drums splits), merely
-        swapping the "full" entry would leave the other entries pointing at
-        the now-stale mix.
+        Behavior by session kind:
 
-        PSARC and create-mode sessions update only `session["audio_file"]`;
-        the next Build CDLC picks up the new audio. PSARCs reloaded from
-        disk before that build still play their original WEM (returned as
-        `persisted: false` so the UI can warn).
+        - **dir-form sloppak**: copies the new audio into
+          ``<source_dir>/stems/`` and rewrites ``manifest.yaml`` to a single
+          ``"full"`` stem. ``source_dir`` IS the on-disk sloppak, so the
+          change persists immediately (``persisted=True``, ``next_step="none"``).
+          The wholesale stems-replacement is intentional — for multi-stem
+          projects (guitar/bass/drums splits), merely swapping the "full"
+          entry would leave other entries pointing at the now-stale mix.
+
+        - **zip-form sloppak**: same writes, but ``source_dir`` is the
+          unpack cache, so the on-disk ``.sloppak`` archive isn't touched
+          until the user hits Save (which re-zips). Returned as
+          ``persisted=False, next_step="save"`` so the UI can prompt.
+
+        - **create-mode (fresh GP import)**: only ``session["audio_file"]``
+          is updated. The next Build CDLC will produce a ``.psarc``
+          referencing the new audio. ``persisted=False, next_step="build"``.
+
+        - **loaded PSARC**: only ``session["audio_file"]`` is updated; the
+          editor uses the new audio for playback, but there is no
+          in-editor flow that repacks WEMs into the original ``.psarc``.
+          ``persisted=False, next_step="rebuild"`` — the UI surfaces this
+          as playback-only.
         """
         session_id = data.get("session_id", "")
         audio_url = (data.get("audio_url") or "").strip()
