@@ -138,6 +138,19 @@ def setup(app, context):
         used.add(aid)
         return aid
 
+    def _is_extended_range(arr) -> bool:
+        """True if any note/chord-note in `arr` is on string > 5 (guitar) or > 3 (bass)."""
+        is_bass = "bass" in (arr.get("name", "") or "").lower()
+        max_string = 3 if is_bass else 5
+        for n in arr.get("notes", []) or []:
+            if int(n.get("string", 0)) > max_string:
+                return True
+        for ch in arr.get("chords", []) or []:
+            for cn in ch.get("notes", []) or []:
+                if int(cn.get("string", 0)) > max_string:
+                    return True
+        return False
+
     def _validate_editor_upload_path(path_str: str, prefix: str) -> Path | None:
         """Resolve a client-supplied upload path and constrain it to the
         editor's tempfile.mkdtemp(prefix=...) sandbox. Returns the resolved
@@ -481,6 +494,33 @@ def setup(app, context):
         # only updates the single arrangement at arrangement_index.
         all_arrangements = data.get("arrangements")
 
+        # Explicit opt-in to lose extended-range data on a PSARC save.
+        # Set by the frontend when the user picked "Save as PSARC (lose
+        # extra strings)" in the format-prompt modal. No-op for sloppak
+        # (sloppak preserves extended range natively).
+        force_psarc_truncate = bool(data.get("force_psarc_truncate", False))
+        if force_psarc_truncate:
+            arr_name = ""
+            if all_arrangements and 0 <= arrangement_index < len(all_arrangements):
+                arr_name = all_arrangements[arrangement_index].get("name", "")
+            is_bass = "bass" in arr_name.lower()
+            max_string = 3 if is_bass else 5
+            notes = [n for n in notes if int(n.get("string", 0)) <= max_string]
+            trimmed_chords = []
+            for ch in chords:
+                kept_cns = [cn for cn in ch.get("notes", []) or []
+                            if int(cn.get("string", 0)) <= max_string]
+                if kept_cns:
+                    new_ch = dict(ch)
+                    new_ch["notes"] = kept_cns
+                    trimmed_chords.append(new_ch)
+            chords = trimmed_chords
+            for ct in chord_templates:
+                if isinstance(ct.get("frets"), list) and len(ct["frets"]) > 6:
+                    ct["frets"] = ct["frets"][:6]
+                if isinstance(ct.get("fingers"), list) and len(ct["fingers"]) > 6:
+                    ct["fingers"] = ct["fingers"][:6]
+
         def _save_psarc():
             xml_files = session["xml_files"]
             if arrangement_index >= len(xml_files):
@@ -722,6 +762,105 @@ def setup(app, context):
             return JSONResponse({"error": str(e)}, 500)
 
         return {"success": True, "path": output}
+
+    # ── Save edited PSARC as Sloppak ──────────────────────────────────────
+    #
+    # When the user added extra strings (7/8-string guitar or 5/6-string
+    # bass) to a PSARC-sourced edit, the regular PSARC save path can't
+    # carry the extra strings — stock Rocksmith's SNG binary is hard-locked
+    # to 6/4. This endpoint writes a new `.sloppak` next to the original
+    # PSARC and updates the session so subsequent saves go through the
+    # native sloppak path. The PSARC stays on disk untouched.
+
+    @app.post("/api/plugins/editor/save_as_sloppak")
+    async def save_as_sloppak(data: dict):
+        session_id = data.get("session_id", "")
+        session = sessions.get(session_id)
+        if not session:
+            return JSONResponse({"error": "No active session"}, 400)
+        if session.get("format") != "psarc":
+            return JSONResponse(
+                {"error": "save_as_sloppak only applies to PSARC-sourced sessions"},
+                400,
+            )
+        session["last_touched"] = time.time()
+
+        arrangements_data = data.get("arrangements") or []
+        if not arrangements_data:
+            return JSONResponse({"error": "arrangements required"}, 400)
+        beats = data.get("beats", [])
+        sections = data.get("sections", [])
+        meta = data.get("metadata", session.get("metadata", {})) or {}
+
+        audio_file = session.get("audio_file") or ""
+        if not audio_file or not Path(audio_file).exists():
+            return JSONResponse({"error": "session has no audio file"}, 400)
+
+        dlc_dir = get_dlc_dir()
+        if not dlc_dir:
+            return JSONResponse({"error": "DLC folder not configured"}, 500)
+
+        source_filename = session["filename"]
+        source_path = (dlc_dir / source_filename).resolve()
+        try:
+            source_path.relative_to(dlc_dir.resolve())
+        except ValueError:
+            return JSONResponse({"error": "forbidden"}, 403)
+
+        # Output sits next to the source PSARC, sharing its stem so the
+        # library shows both `MySong_p.psarc` and `MySong_p.sloppak`.
+        new_filename = source_path.stem + ".sloppak"
+        output_path = source_path.parent / new_filename
+
+        def _do_save():
+            return _write_sloppak_pak(
+                audio_file=audio_file,
+                art_path="",  # PSARC sessions don't extract cover to disk yet
+                arrangements_data=arrangements_data,
+                beats=beats,
+                sections=sections,
+                meta=meta,
+                output_path=output_path,
+            )
+
+        def _do_save_and_repoint():
+            written = _do_save()
+            # Re-extract the just-written sloppak into a fresh working
+            # directory so the next /save call has a real sloppak source
+            # tree (`source_dir/arrangements/*.json`, `manifest.yaml`,
+            # stems) to edit. Without this, `_save_sloppak` would run
+            # against the PSARC unpacked dir with no manifest and emit a
+            # broken .sloppak on the user's next click of Save.
+            new_source_dir = sloppak_mod.resolve_source_dir(
+                new_filename, dlc_dir, SLOPPAK_CACHE,
+            )
+            new_manifest = sloppak_mod.load_manifest(Path(written))
+            return written, new_source_dir, new_manifest
+
+        try:
+            written, new_source_dir, new_manifest = (
+                await asyncio.get_event_loop().run_in_executor(None, _do_save_and_repoint)
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return JSONResponse({"error": str(e)}, 500)
+
+        # Switch session into sloppak mode pointing at the new sloppak's
+        # unpacked cache dir. The PSARC working dir is no longer needed
+        # for edits but we leave it on disk — the user can still close
+        # the tab cleanly; the session-eviction cleanup will reap it.
+        session["filename"] = new_filename
+        session["format"] = "sloppak"
+        session["dir"] = str(new_source_dir)
+        session["sloppak_state"] = {"manifest": new_manifest, "form": "zip"}
+
+        return {
+            "success": True,
+            "path": written,
+            "filename": new_filename,
+            "format": "sloppak",
+        }
 
     # ── Upload album art ───────────────────────────────────────────────
 
@@ -1557,18 +1696,6 @@ def setup(app, context):
         audio_url = data.get("audio_url", "")
         art_path = data.get("art_path", "")
 
-        def _is_extended_range(arr):
-            is_bass = "bass" in (arr.get("name", "") or "").lower()
-            max_string = 3 if is_bass else 5
-            for n in arr.get("notes", []) or []:
-                if int(n.get("string", 0)) > max_string:
-                    return True
-            for ch in arr.get("chords", []) or []:
-                for cn in ch.get("notes", []) or []:
-                    if int(cn.get("string", 0)) > max_string:
-                        return True
-            return False
-
         needs_sloppak = any(_is_extended_range(a) for a in arrangements_data)
 
         def _build():
@@ -1640,7 +1767,11 @@ def setup(app, context):
             )
 
         def _build_sloppak_extended():
-            """Build a .sloppak for extended-range charts (>6 guitar / >4 bass)."""
+            """Build a .sloppak for extended-range charts (>6 guitar / >4 bass).
+
+            Output filename is derived from title/artist for create-mode
+            sessions (no existing source filename to preserve).
+            """
             resolved = _resolve_storage_url(audio_url) if audio_url else None
             audio_file = str(resolved) if resolved else ""
             if not audio_file or not Path(audio_file).exists():
@@ -1652,107 +1783,18 @@ def setup(app, context):
 
             title = meta.get("title", "Untitled")
             artist = meta.get("artistName") or meta.get("artist", "Unknown")
-            album = meta.get("albumName") or meta.get("album", "")
-            year_raw = str(meta.get("albumYear") or meta.get("year", ""))
-            ym = _YEAR_RE.search(year_raw) if year_raw else None
-            year = int(ym.group(1)) if ym else 0
             safe_t = re.sub(r'[<>:"/\\|?*]', '_', title)
             safe_a = re.sub(r'[<>:"/\\|?*]', '_', artist)
-
-            # Build the sloppak in a temp staging dir, then zip into DLC dir.
-            staging = Path(tempfile.mkdtemp(prefix="slopsmith_sloppak_build_"))
-            try:
-                arr_dir = staging / "arrangements"
-                arr_dir.mkdir()
-                stems_dir = staging / "stems"
-                stems_dir.mkdir()
-
-                # Single combined-audio stem — the editor only has one audio
-                # source per create-mode session.
-                audio_ext = Path(audio_file).suffix.lower() or ".ogg"
-                stem_filename = f"audio{audio_ext}"
-                shutil.copy2(audio_file, stems_dir / stem_filename)
-
-                used_ids: set[str] = set()
-                manifest_arrangements = []
-                duration = 0.0
-                for b in beats:
-                    try:
-                        duration = max(duration, float(b.get("time", 0)))
-                    except (TypeError, ValueError):
-                        pass
-
-                for i, ad in enumerate(arrangements_data):
-                    name = ad.get("name", f"Arr{i}")
-                    aid = _arrangement_id(name, used_ids)
-                    used_ids.add(aid)
-                    wire = _arr_dict_to_wire(
-                        name,
-                        ad.get("tuning", [0] * 6),
-                        int(ad.get("capo", 0)),
-                        ad.get("notes", []),
-                        ad.get("chords", []),
-                        ad.get("chord_templates", []),
-                    )
-                    if i == 0:
-                        wire["beats"] = [
-                            {"time": round(float(b.get("time", 0)), 3),
-                             "measure": int(b.get("measure", -1))}
-                            for b in beats
-                        ]
-                        wire["sections"] = [
-                            {"name": s.get("name", ""),
-                             "number": int(s.get("number", 0)),
-                             "time": round(float(s.get("start_time", 0)), 3)}
-                            for s in sections
-                        ]
-                    (arr_dir / f"{aid}.json").write_text(
-                        json.dumps(wire, separators=(",", ":")),
-                        encoding="utf-8",
-                    )
-                    manifest_arrangements.append({
-                        "id": aid,
-                        "name": name,
-                        "file": f"arrangements/{aid}.json",
-                        "tuning": list(ad.get("tuning", [0] * 6)),
-                        "capo": int(ad.get("capo", 0)),
-                    })
-
-                manifest = {
-                    "title": title,
-                    "artist": artist,
-                    "album": album,
-                    "duration": round(duration, 3),
-                    "stems": [
-                        {"id": "audio", "file": f"stems/{stem_filename}", "default": "on"},
-                    ],
-                    "arrangements": manifest_arrangements,
-                }
-                if year:
-                    manifest["year"] = year
-
-                if art_path and Path(art_path).exists():
-                    cover_ext = Path(art_path).suffix.lower() or ".jpg"
-                    cover_name = f"cover{cover_ext}"
-                    shutil.copy2(art_path, staging / cover_name)
-                    manifest["cover"] = cover_name
-
-                (staging / "manifest.yaml").write_text(
-                    yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True),
-                    encoding="utf-8",
-                )
-
-                output = dlc_dir / f"{safe_t}_{safe_a}_p.sloppak"
-                output.parent.mkdir(parents=True, exist_ok=True)
-                tmp_zip = output.with_suffix(output.suffix + ".tmp")
-                with zipfile.ZipFile(str(tmp_zip), "w", zipfile.ZIP_DEFLATED) as zf:
-                    for f in staging.rglob("*"):
-                        if f.is_file():
-                            zf.write(f, f.relative_to(staging).as_posix())
-                tmp_zip.replace(output)
-                return str(output)
-            finally:
-                shutil.rmtree(staging, ignore_errors=True)
+            output = dlc_dir / f"{safe_t}_{safe_a}_p.sloppak"
+            return _write_sloppak_pak(
+                audio_file=audio_file,
+                art_path=art_path if art_path and Path(art_path).exists() else "",
+                arrangements_data=arrangements_data,
+                beats=beats,
+                sections=sections,
+                meta=meta,
+                output_path=output,
+            )
 
         try:
             target = _build_sloppak_extended if needs_sloppak else _build
@@ -1771,6 +1813,123 @@ def setup(app, context):
         }
 
     # ── Helpers ──────────────────────────────────────────────────────────
+
+    def _write_sloppak_pak(*, audio_file: str, art_path: str,
+                          arrangements_data: list, beats: list, sections: list,
+                          meta: dict, output_path: Path) -> str:
+        """Stage a sloppak at `output_path` from the in-memory edit state.
+
+        Shared between the create-mode build path (output_path derived
+        from title/artist) and the save-as-sloppak path (output_path
+        derived from the source PSARC filename, so the new sloppak sits
+        next to the original on disk).
+        """
+        if not audio_file or not Path(audio_file).exists():
+            raise RuntimeError("No audio file available for sloppak write")
+
+        title = meta.get("title", "Untitled")
+        artist = meta.get("artistName") or meta.get("artist", "Unknown")
+        album = meta.get("albumName") or meta.get("album", "")
+        year_raw = str(meta.get("albumYear") or meta.get("year", ""))
+        ym = _YEAR_RE.search(year_raw) if year_raw else None
+        year = int(ym.group(1)) if ym else 0
+
+        staging = Path(tempfile.mkdtemp(prefix="slopsmith_sloppak_build_"))
+        try:
+            arr_dir = staging / "arrangements"
+            arr_dir.mkdir()
+            stems_dir = staging / "stems"
+            stems_dir.mkdir()
+
+            # Single combined-audio stem — the editor only carries one
+            # audio source per session (PSARC load decodes the WEM to a
+            # single ogg; create-mode imports one audio file).
+            audio_ext = Path(audio_file).suffix.lower() or ".ogg"
+            stem_filename = f"audio{audio_ext}"
+            shutil.copy2(audio_file, stems_dir / stem_filename)
+
+            used_ids: set[str] = set()
+            manifest_arrangements = []
+            duration = 0.0
+            for b in beats:
+                try:
+                    duration = max(duration, float(b.get("time", 0)))
+                except (TypeError, ValueError):
+                    pass
+
+            for i, ad in enumerate(arrangements_data):
+                name = ad.get("name", f"Arr{i}")
+                # `_arrangement_id` already inserts into `used_ids` for us.
+                aid = _arrangement_id(name, used_ids)
+                wire = _arr_dict_to_wire(
+                    name,
+                    ad.get("tuning", [0] * 6),
+                    int(ad.get("capo", 0)),
+                    ad.get("notes", []),
+                    ad.get("chords", []),
+                    ad.get("chord_templates", []),
+                )
+                if i == 0:
+                    wire["beats"] = [
+                        {"time": round(float(b.get("time", 0)), 3),
+                         "measure": int(b.get("measure", -1))}
+                        for b in beats
+                    ]
+                    wire["sections"] = [
+                        {"name": s.get("name", ""),
+                         "number": int(s.get("number", 0)),
+                         "time": round(float(s.get("start_time", 0)), 3)}
+                        for s in sections
+                    ]
+                (arr_dir / f"{aid}.json").write_text(
+                    json.dumps(wire, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                manifest_arrangements.append({
+                    "id": aid,
+                    "name": name,
+                    "file": f"arrangements/{aid}.json",
+                    "tuning": list(ad.get("tuning", [0] * 6)),
+                    "capo": int(ad.get("capo", 0)),
+                })
+
+            manifest = {
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "duration": round(duration, 3),
+                # `id: "full"` matches the convention the editor's load
+                # path and replace-audio path already use; sloppak
+                # readers prefer that id when picking the default stem.
+                "stems": [
+                    {"id": "full", "file": f"stems/{stem_filename}"},
+                ],
+                "arrangements": manifest_arrangements,
+            }
+            if year:
+                manifest["year"] = year
+
+            if art_path and Path(art_path).exists():
+                cover_ext = Path(art_path).suffix.lower() or ".jpg"
+                cover_name = f"cover{cover_ext}"
+                shutil.copy2(art_path, staging / cover_name)
+                manifest["cover"] = cover_name
+
+            (staging / "manifest.yaml").write_text(
+                yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_zip = output_path.with_suffix(output_path.suffix + ".tmp")
+            with zipfile.ZipFile(str(tmp_zip), "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in staging.rglob("*"):
+                    if f.is_file():
+                        zf.write(f, f.relative_to(staging).as_posix())
+            tmp_zip.replace(output_path)
+            return str(output_path)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def _arr_dict_to_wire(name, tuning, capo, notes, chords, chord_templates):
         """Convert editor's long-named arrangement dict into sloppak wire format.

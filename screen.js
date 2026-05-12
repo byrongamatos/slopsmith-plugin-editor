@@ -104,7 +104,16 @@ function isBassArr() {
 // so the editor agrees with the highway: combine name-based default (Bass→4,
 // else→6), tuning length when ≠6 (length 6 is RS-schema padding), and the
 // max note-string index. Clamped to [4, MAX_LANES].
+//
+// `lanes()` is O(N) over notes+chords and is on the hot path (strToLane /
+// laneToStr / yToStr are called per-note inside drawNotes and per-mousemove
+// in hit-testing). To avoid the resulting O(N²) per frame on large
+// arrangements, draw() seeds a per-frame cache that this function reads
+// from when active. Mutations outside the draw frame still recompute.
+let _lanesCacheActive = false;
+let _lanesCacheValue = 6;
 function lanes() {
+    if (_lanesCacheActive) return _lanesCacheValue;
     if (!S.arrangements.length) return 6;
     const arr = S.arrangements[S.currentArr];
     if (!arr) return 6;
@@ -336,16 +345,26 @@ function draw() {
     ctx.scale(DPR, DPR);
     ctx.clearRect(0, 0, w, h);
 
-    drawWaveform(w);
-    drawLanes(w);
-    drawGrid(w);
-    drawSections(w);
-    drawBeatBar(w);
-    drawNotes(w);
-    drawSelectionRect(w);
-    drawGhostNotes();
-    drawCursor(w, h);
-    drawLabels(w);
+    // Seed the per-frame `lanes()` cache. drawNotes calls strToLane on every
+    // note (and per-note hit tests do the same), so without this every
+    // frame is O(N²) over the arrangement.
+    _lanesCacheActive = false;  // force a real compute first
+    _lanesCacheValue = lanes();
+    _lanesCacheActive = true;
+    try {
+        drawWaveform(w);
+        drawLanes(w);
+        drawGrid(w);
+        drawSections(w);
+        drawBeatBar(w);
+        drawNotes(w);
+        drawSelectionRect(w);
+        drawGhostNotes();
+        drawCursor(w, h);
+        drawLabels(w);
+    } finally {
+        _lanesCacheActive = false;
+    }
 
     ctx.restore();
 }
@@ -812,6 +831,123 @@ class ChangeFretCmd {
     }
     exec() { notes()[this.index].fret = this.newFret; }
     rollback() { notes()[this.index].fret = this.oldFret; }
+}
+
+// Extend an arrangement's string count by one. `position` is 'low' for
+// adding at the lowest end (guitar low B/F#, 4→5-string bass low B) and
+// 'high' for adding at the high end (5→6-string bass high C). Adding at
+// the low end shifts every existing note's string index up by 1 so the
+// chart visually stays put — only the new lowest lane is empty.
+class AddStringCmd {
+    constructor(arrIdx, position) {
+        this.arrIdx = arrIdx;
+        this.position = position;
+    }
+    _arr() { return S.arrangements[this.arrIdx]; }
+    exec() {
+        const arr = this._arr();
+        const tuning = Array.isArray(arr.tuning) ? arr.tuning.slice() : [0, 0, 0, 0, 0, 0];
+        if (this.position === 'low') {
+            tuning.unshift(0);
+            for (const n of arr.notes || []) n.string += 1;
+            for (const ch of arr.chords || []) {
+                for (const cn of ch.notes || []) cn.string += 1;
+            }
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.unshift(-1);
+                if (Array.isArray(ct.fingers)) ct.fingers.unshift(-1);
+            }
+        } else {
+            tuning.push(0);
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.push(-1);
+                if (Array.isArray(ct.fingers)) ct.fingers.push(-1);
+            }
+        }
+        arr.tuning = tuning;
+    }
+    rollback() {
+        const arr = this._arr();
+        const tuning = Array.isArray(arr.tuning) ? arr.tuning.slice() : [0, 0, 0, 0, 0, 0];
+        if (this.position === 'low') {
+            tuning.shift();
+            for (const n of arr.notes || []) n.string -= 1;
+            for (const ch of arr.chords || []) {
+                for (const cn of ch.notes || []) cn.string -= 1;
+            }
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.shift();
+                if (Array.isArray(ct.fingers)) ct.fingers.shift();
+            }
+        } else {
+            tuning.pop();
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.pop();
+                if (Array.isArray(ct.fingers)) ct.fingers.pop();
+            }
+        }
+        arr.tuning = tuning;
+    }
+}
+
+// Remove a string from the low end (high-end removal isn't exposed — the
+// only "removable" string is the most-recently-added low extension, which
+// also lets us cleanly reverse AddStringCmd('low')). Callers must first
+// verify no notes live on the targeted string (validation lives in the
+// UI handler so the user gets a clear error message).
+class RemoveStringCmd {
+    constructor(arrIdx, position) {
+        this.arrIdx = arrIdx;
+        this.position = position;
+        // Snapshot tuning offset for exact rollback.
+        const t = S.arrangements[arrIdx].tuning || [];
+        this.removedOffset = position === 'low' ? t[0] : t[t.length - 1];
+    }
+    _arr() { return S.arrangements[this.arrIdx]; }
+    exec() {
+        const arr = this._arr();
+        const tuning = arr.tuning.slice();
+        if (this.position === 'low') {
+            tuning.shift();
+            for (const n of arr.notes || []) n.string -= 1;
+            for (const ch of arr.chords || []) {
+                for (const cn of ch.notes || []) cn.string -= 1;
+            }
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.shift();
+                if (Array.isArray(ct.fingers)) ct.fingers.shift();
+            }
+        } else {
+            tuning.pop();
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.pop();
+                if (Array.isArray(ct.fingers)) ct.fingers.pop();
+            }
+        }
+        arr.tuning = tuning;
+    }
+    rollback() {
+        const arr = this._arr();
+        const tuning = arr.tuning.slice();
+        if (this.position === 'low') {
+            tuning.unshift(this.removedOffset);
+            for (const n of arr.notes || []) n.string += 1;
+            for (const ch of arr.chords || []) {
+                for (const cn of ch.notes || []) cn.string += 1;
+            }
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.unshift(-1);
+                if (Array.isArray(ct.fingers)) ct.fingers.unshift(-1);
+            }
+        } else {
+            tuning.push(this.removedOffset);
+            for (const ct of arr.chord_templates || []) {
+                if (Array.isArray(ct.frets)) ct.frets.push(-1);
+                if (Array.isArray(ct.fingers)) ct.fingers.push(-1);
+            }
+        }
+        arr.tuning = tuning;
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1620,6 +1756,19 @@ function updateArrangementSelector() {
         keysBtn.classList.toggle('hidden', !S.sessionId || S.format !== 'sloppak');
     }
 
+    // Show "⋮ Strings" tuning editor whenever a guitar/bass arrangement is
+    // active (not Keys-mode — piano-roll arrangements have no string concept).
+    // Available on both PSARC and sloppak; the save-time prompt handles the
+    // format constraint if PSARC can't carry the result.
+    const stringsBtn = document.getElementById('editor-strings-btn');
+    if (stringsBtn) {
+        const active = S.arrangements[S.currentArr];
+        const stringsMode = !!active
+            && !KEYS_PATTERN.test(active.name || '')
+            && !/^drums/i.test(active.name || '');
+        stringsBtn.classList.toggle('hidden', !S.sessionId || !stringsMode);
+    }
+
     // Show "● Record" (live MIDI) button on sloppak sessions only — PSARC's
     // add-arrangement path requires an xml_path we can't synthesize, and
     // PSARC build silently drops extra arrangements anyway. Mirror the
@@ -1742,28 +1891,39 @@ function filterSongs(q) {
 // Save
 // ════════════════════════════════════════════════════════════════════
 
-async function saveCDLC() {
-    if (!S.sessionId) return;
-    // If a live MIDI take is in flight, finalize it first so its notes
-    // get committed into S.arrangements[_recArrIdx] before we serialize.
-    // Without this, Save mid-recording would persist the new Keys
-    // arrangement with notes: [] and discard the take.
-    if (_recState === 'recording') editorStopRecordMidi();
-    setStatus('Saving...');
+// True if any arrangement in the current session has more strings than
+// the PSARC/stock-RS format can carry: >6 for guitar, >4 for bass. Used
+// to decide whether to surface the format prompt before a PSARC save.
+function _arrangementsExceedPsarcLimit() {
+    for (const a of S.arrangements) {
+        const isBass = /bass/i.test(a.name || '');
+        const max = isBass ? 4 : 6;
+        const tuningLen = Array.isArray(a.tuning) ? a.tuning.length : 6;
+        if (tuningLen > max) return true;
+        // Defensive: tuning may not always reflect actual notes (e.g.
+        // user edited a note onto string 6 without bumping tuning).
+        const stringMax = isBass ? 3 : 5;
+        for (const n of a.notes || []) {
+            if (n.string > stringMax) return true;
+        }
+        for (const ch of a.chords || []) {
+            for (const cn of ch.notes || []) {
+                if (cn.string > stringMax) return true;
+            }
+        }
+    }
+    return false;
+}
 
-    // Sloppak save sends the full S.arrangements snapshot, so every
-    // arrangement (not just the active one) needs its chords reconstructed.
-    // Tab-switching only flattens the new currentArr — non-current
-    // arrangements may be in any of three states: never flattened
-    // (chords:[chord_groups], notes:[regular notes only]), flattened-and-
-    // -unreconstructed (chords:[], notes:[regular + flattened chord notes
-    // tagged with _fromChord]), or already round-tripped through both.
-    // Running flatten→reconstruct on every arrangement normalises them all:
-    // flatten is a no-op on already-flattened ones, and reconstruct rebuilds
-    // the chord groups by time. PSARC saves only emit S.currentArr so they
-    // keep the existing single-pass call.
+// Prep work common to all save paths: normalise chord state across
+// arrangements, then return the request body for the chosen endpoint.
+// `forceFullSnapshot` is true for save_as_sloppak so the new sloppak
+// gets every arrangement (not just S.currentArr).
+function _buildSaveBody(forceFullSnapshot) {
+    if (_recState === 'recording') editorStopRecordMidi();
+
     const savedArr = S.currentArr;
-    if (S.format === 'sloppak') {
+    if (S.format === 'sloppak' || forceFullSnapshot) {
         for (let i = 0; i < S.arrangements.length; i++) {
             S.currentArr = i;
             flattenChords();
@@ -1784,15 +1944,27 @@ async function saveCDLC() {
         beats: S.beats,
         sections: S.sections,
     };
-    // Sloppak: send the full arrangement snapshot so adds/reorders persist
-    // and the per-arrangement files all stay current.
-    if (S.format === 'sloppak') {
+    if (S.format === 'sloppak' || forceFullSnapshot) {
         body.arrangements = S.arrangements;
         body.metadata = {
             title: S.title,
             artist: S.artist,
         };
     }
+    return body;
+}
+
+async function saveCDLC() {
+    if (!S.sessionId) return;
+    // PSARC can't carry >6-string guitar / >4-string bass. If the user
+    // pushed past those limits while editing, ask them whether to spill
+    // into a new .sloppak or accept the truncation before we touch disk.
+    if (S.format === 'psarc' && _arrangementsExceedPsarcLimit()) {
+        document.getElementById('editor-save-format-modal').classList.remove('hidden');
+        return;
+    }
+    setStatus('Saving...');
+    const body = _buildSaveBody(false);
     try {
         const resp = await fetch('/api/plugins/editor/save', {
             method: 'POST',
@@ -1805,11 +1977,77 @@ async function saveCDLC() {
     } catch (e) {
         setStatus('Save failed: ' + e.message);
     } finally {
-        // Re-flatten so editing continues with unified notes
         flattenChords();
         draw();
     }
 }
+
+window.editorHideSaveFormatModal = () => {
+    document.getElementById('editor-save-format-modal').classList.add('hidden');
+};
+
+// "Save as Sloppak" — POST the full arrangement snapshot to the new
+// /save_as_sloppak route. The backend writes a .sloppak next to the
+// source .psarc, then flips the session into sloppak mode so the next
+// regular Save uses the native sloppak path.
+window.editorSaveAsSloppakConfirm = async () => {
+    document.getElementById('editor-save-format-modal').classList.add('hidden');
+    if (!S.sessionId) return;
+    setStatus('Saving as Sloppak...');
+    const body = _buildSaveBody(true);
+    try {
+        const resp = await fetch('/api/plugins/editor/save_as_sloppak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.error) { setStatus('Save error: ' + data.error); return; }
+        // Flip session into sloppak mode so subsequent edits route to
+        // _save_sloppak. The original PSARC stays on disk untouched.
+        if (data.filename) S.filename = data.filename;
+        S.format = 'sloppak';
+        // `updateArrangementSelector` is what owns the + Keys / Strings /
+        // Record toolbar gates and the remove-arrangement button. Refresh
+        // it immediately so the user sees sloppak-only controls light up
+        // the moment the conversion lands.
+        updateArrangementSelector();
+        setStatus('Saved as Sloppak: ' + (data.filename || data.path));
+    } catch (e) {
+        setStatus('Save failed: ' + e.message);
+    } finally {
+        flattenChords();
+        draw();
+    }
+};
+
+// "Save as PSARC (lose extra strings)" — fall back to the regular
+// /save route with `force_psarc_truncate: true`. The backend drops
+// notes on string ≥ 6 (or ≥ 4 for bass) and trims chord templates
+// before XML rebuild, so the resulting PSARC is internally consistent
+// and works in stock Rocksmith.
+window.editorSavePsarcTruncateConfirm = async () => {
+    document.getElementById('editor-save-format-modal').classList.add('hidden');
+    if (!S.sessionId) return;
+    setStatus('Saving (extra strings will be dropped)...');
+    const body = _buildSaveBody(false);
+    body.force_psarc_truncate = true;
+    try {
+        const resp = await fetch('/api/plugins/editor/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.error) { setStatus('Save error: ' + data.error); return; }
+        setStatus('Saved as PSARC (extra strings dropped)');
+    } catch (e) {
+        setStatus('Save failed: ' + e.message);
+    } finally {
+        flattenChords();
+        draw();
+    }
+};
 
 // ════════════════════════════════════════════════════════════════════
 // UI Helpers
@@ -2804,6 +3042,130 @@ window.editorDoAddDrums = async () => {
         statusEl.textContent = 'Failed: ' + e.message;
         goBtn.disabled = false;
     }
+};
+
+// ════════════════════════════════════════════════════════════════════
+// Strings (tuning) editor — add/remove strings on the active arrangement
+// ════════════════════════════════════════════════════════════════════
+
+// Range per role. Bass extends low-then-high (4 → 5 add low B → 6 add high
+// C); guitar extends low-only (6 → 7 low B → 8 low F#).
+function _stringsRangeForActive() {
+    const arr = S.arrangements[S.currentArr];
+    const isBass = arr && /bass/i.test(arr.name || '');
+    return isBass
+        ? { min: 4, max: 6, defaultPos: 'low' }
+        : { min: 6, max: 8, defaultPos: 'low' };
+}
+
+function _nextAddPosition(arr, isBass) {
+    const cur = (arr.tuning || []).length || (isBass ? 4 : 6);
+    if (isBass && cur === 5) return 'high';  // 5→6 bass adds high C
+    return 'low';
+}
+
+function _notesOnString(arr, idx) {
+    let count = 0;
+    for (const n of arr.notes || []) if (n.string === idx) count += 1;
+    for (const ch of arr.chords || []) {
+        for (const cn of ch.notes || []) if (cn.string === idx) count += 1;
+    }
+    return count;
+}
+
+function _renderStringsModal() {
+    const arr = S.arrangements[S.currentArr];
+    if (!arr) return;
+    const labels = laneLabels();           // low → high
+    const tuning = arr.tuning || [0, 0, 0, 0, 0, 0];
+    const { min, max } = _stringsRangeForActive();
+    const isBass = /bass/i.test(arr.name || '');
+
+    const summary = document.getElementById('editor-strings-summary');
+    if (summary) {
+        summary.textContent = `${arr.name || 'Arrangement'} — ${labels.length} string${labels.length === 1 ? '' : 's'} (${isBass ? 'bass' : 'guitar'}; range ${min}–${max})`;
+    }
+
+    const list = document.getElementById('editor-strings-list');
+    if (list) {
+        // Display low → high so it reads naturally; `tuning` is also
+        // low → high in RS XML order, so iterating tuning matches.
+        list.innerHTML = labels.map((lbl, i) => {
+            const off = tuning[i] ?? 0;
+            const offTxt = off === 0 ? '0' : (off > 0 ? `+${off}` : `${off}`);
+            return `<div class="flex justify-between bg-dark-800 rounded px-2 py-1"><span>String ${i} (${lbl})</span><span class="text-gray-500">${offTxt} st</span></div>`;
+        }).join('');
+    }
+
+    const addBtn = document.getElementById('editor-strings-add');
+    const removeBtn = document.getElementById('editor-strings-remove');
+    const warn = document.getElementById('editor-strings-warning');
+    if (addBtn) addBtn.disabled = labels.length >= max;
+    if (removeBtn) {
+        // Only the most-recently-added low/high string is removable, and
+        // only if no notes live on it. For 6-bass, that's the high C
+        // (last index). For everything else it's the low extension
+        // (index 0). We mirror the add-position logic.
+        const pos = _nextAddPosition(arr, isBass) === 'high' && labels.length === 6 && isBass
+            ? 'high'
+            : 'low';
+        const targetIdx = pos === 'low' ? 0 : labels.length - 1;
+        const blockers = _notesOnString(arr, targetIdx);
+        const atFloor = labels.length <= min;
+        removeBtn.disabled = atFloor || blockers > 0;
+        if (warn) {
+            if (atFloor) {
+                warn.textContent = `Already at the minimum ${min} strings.`;
+            } else if (blockers > 0) {
+                warn.textContent = `${blockers} note${blockers === 1 ? '' : 's'} on string ${targetIdx} — delete or move them before removing.`;
+            } else {
+                warn.textContent = '';
+            }
+        }
+    }
+}
+
+window.editorShowStringsModal = () => {
+    const arr = S.arrangements[S.currentArr];
+    if (!arr) return;
+    if (KEYS_PATTERN.test(arr.name || '') || /^drums/i.test(arr.name || '')) return;
+    document.getElementById('editor-strings-modal').classList.remove('hidden');
+    _renderStringsModal();
+};
+
+window.editorHideStringsModal = () => {
+    document.getElementById('editor-strings-modal').classList.add('hidden');
+};
+
+window.editorAddString = () => {
+    const arr = S.arrangements[S.currentArr];
+    if (!arr) return;
+    const isBass = /bass/i.test(arr.name || '');
+    const { max } = _stringsRangeForActive();
+    if ((arr.tuning || []).length >= max) return;
+    const pos = _nextAddPosition(arr, isBass);
+    S.history.exec(new AddStringCmd(S.currentArr, pos));
+    _renderStringsModal();
+    draw();
+    updateStatus();
+};
+
+window.editorRemoveString = () => {
+    const arr = S.arrangements[S.currentArr];
+    if (!arr) return;
+    const isBass = /bass/i.test(arr.name || '');
+    const { min } = _stringsRangeForActive();
+    const cur = (arr.tuning || []).length;
+    if (cur <= min) return;
+    // Mirror the position logic from add: 6-bass removes high (last),
+    // everything else removes the low extension (index 0).
+    const pos = cur === 6 && isBass ? 'high' : 'low';
+    const targetIdx = pos === 'low' ? 0 : cur - 1;
+    if (_notesOnString(arr, targetIdx) > 0) return;  // UI button is disabled too
+    S.history.exec(new RemoveStringCmd(S.currentArr, pos));
+    _renderStringsModal();
+    draw();
+    updateStatus();
 };
 
 // ════════════════════════════════════════════════════════════════════
